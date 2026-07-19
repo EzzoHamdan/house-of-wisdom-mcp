@@ -214,13 +214,13 @@ MCP client weighs them.  No synthesizer runs, in any mode.
 #### How a call flows (rendered)
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': 'ui-monospace, SFMono-Regular, Menlo, monospace', 'lineColor': '#8b949e'}}}%%
+%%{init: {'themeVariables': {'lineColor': '#8b949e'}}}%%
 flowchart TD
     C([MCP client]) -->|ai_council| V{{"validate<br/>context ≤200k · question ≤10k"}}
-    V -->|invalid| E1[/INVALID_INPUT/]
+    V -->|invalid| E1["INVALID_INPUT"]
     V --> R["roster = first max_models enabled"]
     R --> S{{"models arg passed?"}}
-    S -->|yes, none match| E2[/NO_MATCHING_MODELS/]
+    S -->|yes, none match| E2["NO_MATCHING_MODELS"]
     S --> M{{"resolve mode"}}
     M -->|scribe| P["call_models_parallel<br/>no tools · no semaphore"]
     M -->|translator| A["call_models_parallel_agentic<br/>budget = max_tool_iterations"]
