@@ -52,10 +52,10 @@ curl -O https://raw.githubusercontent.com/EzzoHamdan/house-of-wisdom-mcp/master/
 #    args:    --from git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master
 #             ai-council --config /absolute/path/to/config.yaml
 
-# 4. Restart the client, then ask your agent to call `ai_council_list_models`.
+# 4. Restart the client, then ask your agent to call `list_models`.
 ```
 
-If `ai_council_list_models` returns your roster, the server is loaded. Then try one `ai_council`
+If `list_models` returns your roster, the server is loaded. Then try one `consult`
 call in `scribe` mode — it is the fast path and needs no filesystem access.
 
 ---
@@ -97,7 +97,12 @@ are passed. `scholar` can only be reached by asking for it explicitly.
 
 ## The two tools
 
-### `ai_council_list_models`
+> **Renamed in v0.5.0.** `ai_council` → `consult` and `ai_council_list_models` → `list_models`.
+> The old names still work — they are accepted as backward-compatible aliases, so clients or
+> scripts registered before the rename keep functioning. Only the new names are advertised, so your
+> agent will discover and use `consult` / `list_models` going forward.
+
+### `list_models`
 
 Takes no arguments. Returns the configured roster straight from loaded config.
 
@@ -120,7 +125,7 @@ It does **not** contact any endpoint and does **not** validate API keys. `enable
 entry, while only the first `max_models` enabled ones can actually fire — see
 [Who actually fires](#who-actually-fires).
 
-### `ai_council`
+### `consult`
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -166,7 +171,7 @@ entry, while only the first `max_models` enabled ones can actually fire — see
 | `NO_MATCHING_MODELS` | A `models` array was passed and matched nothing in the fireable window |
 | `NOT_ENOUGH_MODELS_ENABLED` | The fireable roster is empty (startup validation normally prevents this) |
 | `ALL_MODELS_FAILED` | Every consultant errored or the whole batch timed out |
-| `UNKNOWN_TOOL` | Tool name is neither `ai_council` nor `ai_council_list_models` |
+| `UNKNOWN_TOOL` | Tool name is neither `consult` nor `list_models` |
 | `INTERNAL_ERROR` | Unhandled exception; `details` carries the Python error string |
 
 `data` is `null` on every error except `ALL_MODELS_FAILED`, which carries
@@ -180,7 +185,7 @@ retrying.
 
 ```text
 MCP client (the orchestrator)
-  │ ai_council(context, question, mode?, workspace_root?, scope_hint?, models?)
+  │ consult(context, question, mode?, workspace_root?, scope_hint?, models?)
   ▼
 main.py::_process_ai_council
   ├─ validate      context 1..200,000 chars · question 1..10,000 chars   → INVALID_INPUT
@@ -216,7 +221,7 @@ MCP client weighs them.  No synthesizer runs, in any mode.
 ```mermaid
 %%{init: {'themeVariables': {'lineColor': '#8b949e'}}}%%
 flowchart TD
-    C([MCP client]) -->|ai_council| V{{"validate<br/>context ≤200k · question ≤10k"}}
+    C([MCP client]) -->|consult| V{{"validate<br/>context ≤200k · question ≤10k"}}
     V -->|invalid| E1["INVALID_INPUT"]
     V --> R["roster = first max_models enabled"]
     R --> S{{"models arg passed?"}}
@@ -278,6 +283,12 @@ args:     --from  git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master
           --config  /absolute/path/to/config.yaml
 ```
 
+> **The server key is the display name.** The key you give the entry under `mcpServers`
+> (`House-of-Wisdom` below) is what your IDE shows as the tool prefix, e.g.
+> `House-of-Wisdom [consult]`. Rename it to whatever you like — it is purely cosmetic and lives in
+> *your* client config, not in this repo. The `ai-council` token inside `args` is a different thing
+> (the installed console-script name) and must stay as-is.
+
 **Claude Desktop** — Settings → Developer → Edit Config, which opens
 `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
 `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
@@ -285,7 +296,7 @@ args:     --from  git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master
 ```json
 {
   "mcpServers": {
-    "ai-council": {
+    "House-of-Wisdom": {
       "command": "uvx",
       "args": ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master",
                "ai-council", "--config", "/absolute/path/to/config.yaml"]
@@ -304,7 +315,7 @@ mode:
 ```json
 {
   "mcpServers": {
-    "ai-council": {
+    "House-of-Wisdom": {
       "command": "uvx",
       "args": ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master",
                "ai-council", "--config", "/absolute/path/to/config.yaml"],
@@ -318,14 +329,14 @@ mode:
 flag:
 
 ```bash
-claude mcp add ai-council -- uvx --from git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master \
+claude mcp add House-of-Wisdom -- uvx --from git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master \
   ai-council --config /absolute/path/to/config.yaml
 ```
 
 **Codex CLI** — `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.ai-council]
+[mcp_servers."House-of-Wisdom"]
 command = "uvx"
 args = ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master",
         "ai-council", "--config", "/absolute/path/to/config.yaml"]
@@ -340,8 +351,8 @@ Config is read once at process start. Every config edit or server upgrade needs 
 
 ### Step 4 — verify
 
-1. Call `ai_council_list_models` → your roster comes back.
-2. Call `ai_council` with `mode: "scribe"`, a short `context`, and a short `question` → each model
+1. Call `list_models` → your roster comes back.
+2. Call `consult` with `mode: "scribe"`, a short `context`, and a short `question` → each model
    answers. This isolates model connectivity from filesystem/sandbox concerns.
 3. Only then try `translator` with an explicit `workspace_root`.
 
@@ -549,7 +560,7 @@ surface, name the tools you want, e.g. `["read_file", "think"]`.
   `relative_to()`, so symlinks pointing out of the root are rejected as `SandboxViolation`
   (`tools.py::ToolRegistry._resolve`).
 - No tool call at all in `scribe` mode.
-- No endpoint contact from `ai_council_list_models`.
+- No endpoint contact from `list_models`.
 - No merging of perspectives, in any mode.
 
 ### Budget accounting
@@ -611,7 +622,7 @@ in code.
 | Advertised version | The server announces itself to MCP clients as version `0.2.3` while the package is `0.4.3`. `main.py:438` |
 | `synthesis_model_selection` | Accepted in YAML, never read. No synthesizer exists to select. |
 | Tool budget | Counts assistant turns containing tool calls, not individual calls. |
-| In-client tool description | The `ai_council` description your agent reads calls `translator` the default and quotes a ~12-call budget. Both describe the example config, not the built-in defaults (`scribe`, 8). This table and the [defaults table](#every-key-with-both-defaults) are authoritative. `main.py:148-151` |
+| In-client tool description | The `consult` description your agent reads calls `translator` the default and quotes a ~12-call budget. Both describe the example config, not the built-in defaults (`scribe`, 8). This table and the [defaults table](#every-key-with-both-defaults) are authoritative. `main.py:148-151` |
 
 ---
 
