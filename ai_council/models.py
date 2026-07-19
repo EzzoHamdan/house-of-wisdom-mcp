@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 from .logger import AICouncilLogger
@@ -10,6 +11,18 @@ from .config import AICouncilConfig, ModelConfig, Provider, load_config
 class ConfigValidationError(Exception):
     """Raised when configuration validation fails."""
     pass
+
+
+@dataclass
+class ConsultantResult:
+    """Outcome of a single consultant call.
+
+    `ok` is the authoritative success flag. Callers MUST read `ok` and never
+    infer success by prefix-matching `text` — a legitimate answer can start
+    with a word like "Error", and a failure (e.g. empty output) need not.
+    """
+    text: str
+    ok: bool
 
 
 def _extract_text(msg) -> str:
@@ -91,6 +104,13 @@ class ModelManager:
         # Determine base URL
         if model_config.provider == Provider.CUSTOM:
             base_url = model_config.base_url
+            if not base_url:
+                # Never let a custom model fall back to AsyncOpenAI's default
+                # (api.openai.com) — that would ship prompts and the wrong
+                # bearer token to OpenAI. Config validation catches this too.
+                raise ValueError(
+                    f"Custom endpoint model {model_config.name} requires a base_url"
+                )
         elif model_config.provider == Provider.OPENROUTER:
             base_url = "https://openrouter.ai/api/v1"
         else:
@@ -105,30 +125,29 @@ class ModelManager:
         return self.config.get_enabled_models()
     
     async def call_model(
-        self, 
-        model_config: ModelConfig, 
-        context: str, 
+        self,
+        model_config: ModelConfig,
+        context: str,
         question: str,
-        is_synthesis: bool = False
-    ) -> str:
-        """Make an API call to a specific model."""
+    ) -> ConsultantResult:
+        """Make an API call to a specific model.
+
+        Returns a ConsultantResult; `ok` is False on any API error or when the
+        model produces no usable content even after a retry nudge.
+        """
         start_time = time.time()
         self.logger.debug(f"Calling {model_config.name}...", {
             "model": model_config.name,
             "code_name": model_config.code_name
         })
-        
+
         try:
             # Input validation
             if not question or not question.strip():
                 raise ValueError("Question cannot be empty")
-            
-            # For synthesis calls, use the question as the full prompt
-            if is_synthesis:
-                prompt = question
-            else:
-                prompt = f"Context: {context}\n\nQuestion: {question}\n\nPlease provide a detailed, well-reasoned answer."
-            
+
+            prompt = f"Context: {context}\n\nQuestion: {question}\n\nPlease provide a detailed, well-reasoned answer."
+
             # Choose the appropriate client
             client = self._get_client_for_model(model_config)
 
@@ -186,8 +205,8 @@ class ModelManager:
                 "response_preview": content[:200] + "..." if len(content) > 200 else content
             })
             
-            return content
-            
+            return ConsultantResult(text=content, ok=True)
+
         except Exception as e:
             duration = time.time() - start_time
             error_msg = f"Error from {model_config.name}: {str(e)}"
@@ -196,7 +215,7 @@ class ModelManager:
                 "error": str(e),
                 "duration": duration
             })
-            return error_msg
+            return ConsultantResult(text=error_msg, ok=False)
 
     async def call_model_with_tools(
         self,
@@ -207,7 +226,7 @@ class ModelManager:
         tool_dispatcher,
         max_iterations: int = 8,
         timeout: Optional[int] = None,
-    ) -> str:
+    ) -> ConsultantResult:
         """Run a tool-calling loop against a single model.
 
         The model may emit either final text content (loop ends, returned) or
@@ -225,7 +244,8 @@ class ModelManager:
             timeout: optional total timeout in seconds.
 
         Returns:
-            The final text content from the model.
+            A ConsultantResult. `ok` is False on timeout, on any exception, and
+            when the model never produces usable text (even after nudges).
         """
         start_time = time.time()
         client = self._get_client_for_model(model_config)
@@ -238,7 +258,7 @@ class ModelManager:
 
         iterations = 0
         try:
-            async def _loop() -> str:
+            async def _loop() -> ConsultantResult:
                 nonlocal iterations
                 while True:
                     response = await client.chat.completions.create(
@@ -255,7 +275,7 @@ class ModelManager:
                     if not tool_calls:
                         text = _extract_text(msg)
                         if text:
-                            return text
+                            return ConsultantResult(text=text, ok=True)
                         # Empty content AND no tool calls: nudge once, then give up.
                         messages.append({
                             "role": "assistant",
@@ -275,7 +295,12 @@ class ModelManager:
                             max_tokens=16000,
                         )
                         text = _extract_text(retry.choices[0].message)
-                        return text or "Consultant returned empty content after retry."
+                        if text:
+                            return ConsultantResult(text=text, ok=True)
+                        return ConsultantResult(
+                            text="Consultant returned empty content after retry.",
+                            ok=False,
+                        )
 
                     iterations += 1
                     if iterations > max_iterations:
@@ -298,7 +323,7 @@ class ModelManager:
                         )
                         text = _extract_text(final.choices[0].message)
                         if text:
-                            return text
+                            return ConsultantResult(text=text, ok=True)
                         # One more nudge without tools advertised
                         messages.append({"role": "assistant", "content": ""})
                         messages.append({
@@ -313,7 +338,12 @@ class ModelManager:
                             tools=None,
                         )
                         text = _extract_text(final2.choices[0].message)
-                        return text or "Consultant returned empty content after forcing final."
+                        if text:
+                            return ConsultantResult(text=text, ok=True)
+                        return ConsultantResult(
+                            text="Consultant returned empty content after forcing final.",
+                            ok=False,
+                        )
 
                     # Append the assistant message carrying the tool_calls
                     messages.append(msg.model_dump(exclude_none=True))
@@ -343,54 +373,71 @@ class ModelManager:
                 f"Synthesizer tool loop timed out after {effective_timeout}s "
                 f"({iterations} iterations)"
             )
-            return "Synthesis timed out during agentic tool loop."
+            return ConsultantResult(
+                text="Synthesis timed out during agentic tool loop.", ok=False
+            )
         except Exception as e:
             duration = time.time() - start_time
             self.logger.error(
                 f"Synthesizer tool loop failed after {duration:.2f}s: {e}"
             )
-            return f"Error during agentic synthesis: {e}"
+            return ConsultantResult(text=f"Error during agentic synthesis: {e}", ok=False)
     
+    async def _gather_consultants(
+        self,
+        coros: List[Any],
+        models: List[ModelConfig],
+        timeout: int,
+    ) -> List[ConsultantResult]:
+        """Run consultant coroutines concurrently, preserving completed work.
+
+        Uses ``asyncio.wait`` with a timeout rather than
+        ``wait_for(gather(...))``: results that already finished are kept, and
+        only consultants still running at the deadline are cancelled and
+        reported as timed out. ``wait_for`` cancels the entire batch, which
+        turned one slow consultant into a total (ALL_MODELS_FAILED) failure.
+
+        Returns one ConsultantResult per model, in the original order.
+        """
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            # Await the cancellations so the tasks don't leak.
+            await asyncio.gather(*pending, return_exceptions=True)
+            self.logger.error(
+                f"{len(pending)} consultant(s) did not finish within {timeout}s; "
+                "keeping the results that completed."
+            )
+
+        results: List[ConsultantResult] = []
+        for i, task in enumerate(tasks):
+            if task in done:
+                exc = task.exception()
+                if exc is not None:
+                    results.append(ConsultantResult(
+                        text=f"Error for model {models[i].name}: {exc}", ok=False))
+                else:
+                    results.append(task.result())
+            else:
+                results.append(ConsultantResult(
+                    text=f"Timeout: {models[i].name} did not finish within {timeout}s",
+                    ok=False))
+        return results
+
     async def call_models_parallel(
-        self, 
-        models: List[ModelConfig], 
-        context: str, 
+        self,
+        models: List[ModelConfig],
+        context: str,
         question: str
-    ) -> List[str]:
-        """Call multiple models in parallel."""
+    ) -> List[ConsultantResult]:
+        """Call multiple models in parallel, keeping whatever completed."""
         if not models:
             raise ValueError("No models provided for parallel calls")
-        
-        timeout = self.config.parallel_timeout
-        
-        try:
-            tasks = [
-                self.call_model(model, context, question) 
-                for model in models
-            ]
-            
-            responses = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout
-            )
-            
-            # Handle exceptions in responses
-            final_responses = []
-            for i, response in enumerate(responses):
-                if isinstance(response, Exception):
-                    error_msg = f"Error for model {models[i].name}: {str(response)}"
-                    final_responses.append(error_msg)
-                else:
-                    final_responses.append(response)
-            
-            return final_responses
-            
-        except asyncio.TimeoutError:
-            self.logger.error(f"Parallel calls timed out after {timeout}s")
-            return [f"Timeout error for model {model.name}" for model in models]
-        except Exception as e:
-            self.logger.error(f"Error in parallel calls: {e}")
-            return [f"Error for model {model.name}: {str(e)}" for model in models]
+
+        coros = [self.call_model(model, context, question) for model in models]
+        return await self._gather_consultants(coros, models, self.config.parallel_timeout)
 
     async def call_models_parallel_agentic(
         self,
@@ -401,7 +448,7 @@ class ModelManager:
         tool_registries: List[Any],
         max_iterations: int = 8,
         scope_hint: Optional[str] = None,
-    ) -> List[str]:
+    ) -> List[ConsultantResult]:
         """Run a tool-calling loop for every consultant, concurrency-capped.
 
         Each consultant runs its own read-only investigation of the workspace
@@ -486,25 +533,10 @@ class ModelManager:
                     max_iterations=max_iterations,
                 )
 
-        try:
-            tasks = [
-                _run_one(model, registry)
-                for model, registry in zip(models, tool_registries)
-            ]
-            responses = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout,
-            )
-            final_responses = []
-            for i, response in enumerate(responses):
-                if isinstance(response, Exception):
-                    final_responses.append(f"Error for model {models[i].name}: {str(response)}")
-                else:
-                    final_responses.append(response)
-            return final_responses
-        except asyncio.TimeoutError:
-            self.logger.error(f"Parallel agentic calls timed out after {timeout}s")
-            return [f"Timeout error for model {model.name}" for model in models]
-        except Exception as e:
-            self.logger.error(f"Error in parallel agentic calls: {e}")
-            return [f"Error for model {model.name}: {str(e)}" for model in models] 
+        coros = [
+            _run_one(model, registry)
+            for model, registry in zip(models, tool_registries)
+        ]
+        # Keep whatever finished: a single slow consultant no longer cancels
+        # the batch and collapses a partial success into ALL_MODELS_FAILED.
+        return await self._gather_consultants(coros, models, timeout) 

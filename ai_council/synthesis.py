@@ -180,20 +180,17 @@ class ResponseSynthesizer:
             )
 
         perspectives: List[Dict[str, Any]] = []
-        for model, analysis in zip(models, analyses):
-            is_error = (
-                analysis.startswith("Error from")
-                or analysis.startswith("Error for model")
-                or analysis.startswith("Timeout error")
-                or analysis.startswith("Error during agentic")
-                or analysis.startswith("Synthesis timed out")
-            )
+        for model, result in zip(models, analyses):
+            # `result.ok` is authoritative — status is no longer guessed by
+            # prefix-matching the analysis text (which both misclassified real
+            # answers starting with "Error" and passed empty-content failures
+            # off as "ok").
             perspectives.append({
                 "label": self._label_for(model, anonymous),
                 "model_name": model.name,
                 "code_name": model.code_name,
-                "analysis": analysis,
-                "status": "error" if is_error else "ok",
+                "analysis": result.text,
+                "status": "ok" if result.ok else "error",
                 "mode": mode.value,
             })
 
