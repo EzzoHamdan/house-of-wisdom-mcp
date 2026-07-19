@@ -1,212 +1,445 @@
 # House of Wisdom MCP
 
-> The medieval Bayt al-Hikma succeeded because it was **diverse**. Scholars, translators, and thinkers from many traditions worked side by side, each bringing a distinct lens to the same questions. This MCP does the same for AI: consult multiple model families in parallel; each investigates independently and returns its own complete perspective. There is no synthesizer — *you* (the orchestrator) weigh the perspectives yourself, exactly as the House of Wisdom's readers weighed many sources.
+> **What this is** — an MCP (Model Context Protocol) server that asks the same question to several
+> different AI model families at once and hands you back every answer, unmerged.
+>
+> **How to read it** — [What it is](#what-it-is-and-what-it-is-not) → [Quick start](#quick-start) →
+> [The three modes](#the-three-modes) → [The two tools](#the-two-tools) →
+> [How a call flows](#how-a-call-flows) → [Installation](#installation) →
+> [Configuration](#configuration-reference). Go to [Sharp edges](#sharp-edges) when something
+> surprises you.
+>
+> **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
+>
+> **Reflects code as of** — 2026-07-19, commit `f729be5`, package version `0.4.3`.
 
-**Multi-AI consultation, not synthesis.** An MCP (Model Context Protocol) server that consults multiple AI models simultaneously — OpenAI, Anthropic via OpenRouter, DeepSeek, local Ollama models, and any OpenAI-compatible API. Get more reliable, comprehensive answers by combining insights from diverse model families, each grounded in its own investigation.
-
-> **Why the name:** the original [House of Wisdom](https://en.wikipedia.org/wiki/House_of_Wisdom) (9th-century Baghdad) was a multi-tradition, multi-discipline institution where the best answers emerged from many perspectives, not from a single authority. That is the entire premise of this tool.
+The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
+diverse: scholars, translators, and copyists from many traditions read the same questions through
+different lenses, and the reader weighed the results. This server does the same with models —
+OpenAI, Anthropic and Google via OpenRouter, DeepSeek, local Ollama, or any OpenAI-compatible
+endpoint.
 
 ---
 
-## The three modes (SCRIBE / TRANSLATOR / SCHOLAR)
+## What it is, and what it is not
 
-The House of Wisdom framing maps to three cognitive depths, named for medieval roles. Pick a mode based on how complex and open the question is.
+| It does | It does not |
+| --- | --- |
+| Fire N models in parallel on one question | Merge, rank, vote, or summarize their answers |
+| Return one complete, self-contained analysis per model | Return a single "council answer" |
+| Optionally let each model read your codebase first (read-only) | Ever write, execute, or network beyond each model's own endpoint |
+| Tag each answer with the mode it was asked to run in | Tell you which answer is correct |
 
-### SCRIBE — `mode: "scribe"`
-One-shot from given context, **no tool calls**, ~10s. The fast path.
+**There is no synthesizer.** The caller — your IDE agent — reads every perspective and decides.
+Treating any single perspective as ground truth defeats the design.
 
-The medieval scribe copied and answered from the manuscript in front of him — he didn't go looking for more. Use SCRIBE when:
-- You have **already pre-fed the relevant file/code contents** into `context`, OR
-- The question is a **judgment call** that doesn't need codebase verification.
+**Do not fire the council on every prompt.** It costs several model calls and tens of seconds.
+Use it only when a *different model family* seeing the problem would plausibly change the outcome.
+For work that just needs your own focused reasoning, use a single-mind thinking tool instead.
 
-Equivalent to the old `agentic: false`. Three parallel inferences, no tools. Fits a 3-concurrent-model cloud plan (e.g. Ollama Pro).
+---
 
-### TRANSLATOR — `mode: "translator"` (default)
-Bounded, **scope-caged** tool loop. Each consultant investigates within `scope_hint` and a tight tool budget (~12 calls), then answers. ~30-60s.
+## Quick start
 
-The medieval translator worked carefully through specific source material — he stayed with the text he was given. Use TRANSLATOR when:
-- The answer must be **grounded in specific known files** (you know which files matter), AND
-- You want each consultant to **verify its claims** against those files before answering.
+```bash
+# 1. Get a config file
+curl -O https://raw.githubusercontent.com/EzzoHamdan/house-of-wisdom-mcp/master/config.example.yaml
 
-Equivalent to the old `agentic: true`. The `scope_hint` is a cage — consultants are told not to wander outside it.
+# 2. Edit it — the only field you MUST set is `models`, and at least 2 must be enabled.
 
-### SCHOLAR — `mode: "scholar"`
-**Liberated free inquiry.** Generous tool budget (~64 calls), `scope_hint` treated as a starting point not a cage, consultants may follow relevant threads elsewhere in the workspace. Slowest; bounded by `parallel_timeout`.
+# 3. Register the server with your MCP client (see Installation for per-client syntax):
+#    command: uvx
+#    args:    --from git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master
+#             ai-council --config /absolute/path/to/config.yaml
 
-The medieval scholar was a free inquirer — he followed leads across the library, aiming for thoroughness. Use SCHOLAR when:
-- The question is **genuinely open** — you don't know in advance which files matter, AND
-- You want consultants to **explore broadly** and follow relevant threads.
+# 4. Restart the client, then ask your agent to call `ai_council_list_models`.
+```
 
-The `scope_hint` is a starting point, not a cage. Consultants may read elsewhere in the workspace if it materially advances the answer.
+If `ai_council_list_models` returns your roster, the server is loaded. Then try one `ai_council`
+call in `scribe` mode — it is the fast path and needs no filesystem access.
 
-### Decision axis
+---
 
-| Mode | What you get | When to use it |
-|---|---|---|
-| SCRIBE | Diversity on a settled question (3 minds, no tools) | Pre-fed context or judgment calls |
-| TRANSLATOR | Diversity + grounding in known material | Hard problems with known files |
-| SCHOLAR | Diversity + free inquiry for open questions | Genuinely open investigations |
+## The three modes
 
-**Do not fire the council reflexively on every prompt** — only when a different model family seeing the problem would actually change the outcome. For puzzles that just need your own focused reasoning, use your IDE's built-in thinking tool (e.g. `sequentialthinking` if you have it installed) — one mind, instant, free.
+One argument, `mode`, decides how much freedom each consultant gets. It is the only knob that
+changes behavior at call time.
+
+| Mode | Tools | Tool budget | Scope discipline | Use when |
+| --- | --- | --- | --- | --- |
+| `scribe` | none | — | — | You already pasted the relevant code into `context`, or the question is a judgment call needing no lookup |
+| `translator` | read-only | `max_tool_iterations` (built-in **8**) | `scope_hint` is a **cage** — the prompt forbids wandering | You know which files matter and want each model to verify against them |
+| `scholar` | read-only | `scholar_max_tool_iterations` (built-in **64**) | `scope_hint` is a **starting point** — the prompt permits following leads | You do *not* know which files matter |
+
+With default budgets, wall-clock ordering runs `scribe` < `translator` < `scholar`; absolute
+numbers depend entirely on which models you configured and whether they are local or remote.
+Nothing enforces that ordering, though — raising `max_tool_iterations` above
+`scholar_max_tool_iterations` inverts it.
+
+### How the effective mode is resolved
+
+Precedence, highest first (`synthesis.py::collect_perspectives`):
+
+| # | Source | Result |
+| --- | --- | --- |
+| 1 | `mode` argument, if it is one of `scribe` / `translator` / `scholar` (case-insensitive) | that mode |
+| 2 | `mode` argument set to anything else | logs a warning, falls through to 3 |
+| 3 | legacy `agentic` argument | `false` → `scribe`, `true` → `translator` |
+| 4 | `synthesizer_tools.enabled` in config | `true` → `translator`, `false` → `scribe` |
+
+`agentic` is a deprecated boolean kept so older callers keep working; `mode` wins whenever both
+are passed. `scholar` can only be reached by asking for it explicitly.
+
+⚠ `synthesizer_tools.enabled` **only picks the default in row 4.** It is not a gate: an explicit
+`mode: "translator"` or `mode: "scholar"` runs the tool loop even when `enabled: false`.
 
 ---
 
 ## The two tools
 
 ### `ai_council_list_models`
-Lists the configured consultants and whether each is enabled. Call this **before** `ai_council` if you want to:
-- Show the user their current roster
-- Let the user pick a subset
-- Check what's available
 
-Returns: `[{name, model_id, provider, enabled}]` + `max_models` + `enabled_count`.
+Takes no arguments. Returns the configured roster straight from loaded config.
 
-This tool does **not** ping endpoints or verify API keys — it only reflects the server's loaded config.
+```json
+{
+  "status": "success",
+  "data": {
+    "models": [
+      {"name": "GLM", "model_id": "glm-5.2:cloud", "provider": "custom", "enabled": true},
+      {"name": "Kimi", "model_id": "kimi-k2.7-code:cloud", "provider": "custom", "enabled": true}
+    ],
+    "max_models": 3,
+    "enabled_count": 2
+  }
+}
+```
+
+It does **not** contact any endpoint and does **not** validate API keys. `enabled: true` means
+"present in config and not switched off", nothing more. Note that `models` lists every configured
+entry, while only the first `max_models` enabled ones can actually fire — see
+[Who actually fires](#who-actually-fires).
 
 ### `ai_council`
-Fires the council. Returns a list of independent perspectives (no synthesizer), each tagged with the mode it ran in.
 
-**Arguments:**
-| Arg | Type | Required | Description |
-|---|---|---|---|
-| `context` | string | yes | Background info. For SCRIBE mode, paste file contents here (up to 200k chars). For TRANSLATOR/SCHOLAR, brief context is enough — consultants read files themselves. |
-| `question` | string | yes | The question to answer. |
-| `mode` | string | no | `"scribe"` / `"translator"` / `"scholar"`. Takes precedence over the deprecated `agentic` arg. Defaults to `translator` if `synthesizer_tools.enabled` is true, else `scribe`. |
-| `workspace_root` | string | no | Sandbox root for TRANSLATOR/SCHOLAR modes. Absolute path. Only used when mode is not scribe. |
-| `scope_hint` | string | no | TRANSLATOR/SCHOLAR only. Natural-language scope, e.g. `"Start with A.md and B.md"`. In TRANSLATOR mode this is a cage; in SCHOLAR mode it's a starting point. |
-| `models` | array of strings | no | Subset of consultant names to fire, e.g. `["GLM", "Opus"]`. Unknown names ignored; if none match, call fails. Omit to use all enabled models. |
-| `agentic` | boolean | no | **DEPRECATED** — use `mode` instead. `false`→SCRIBE, `true`→TRANSLATOR. Kept for backward compat. |
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `context` | string | **yes** | Background. Must be non-empty, max **200,000** characters. In `scribe` mode this is the only material the models see, so paste file contents here. |
+| `question` | string | **yes** | Must be non-empty, max **10,000** characters. |
+| `mode` | string | no | `scribe` \| `translator` \| `scholar`. See [resolution order](#how-the-effective-mode-is-resolved). |
+| `workspace_root` | string | no | Absolute path used as the read-only sandbox root. Ignored in `scribe`. Falls back to `synthesizer_tools.workspace_root`, then to the **server process's current working directory** — which is set by your MCP client, not by you. Pass it explicitly. |
+| `scope_hint` | string | no | Free text injected into each consultant's system prompt, e.g. `"Start with main.py and config.py"`. Ignored in `scribe`. |
+| `models` | array of strings | no | Subset of consultant `name` values to fire. Unknown names are dropped silently; if none survive, the call fails with `NO_MATCHING_MODELS`. ⚠ Selects only within the first `max_models` enabled entries. |
+| `agentic` | boolean | no | Deprecated alias: `false` → `scribe`, `true` → `translator`. Overridden by `mode`. |
 
-**Return shape:**
+**Success shape.** One entry per model that was dispatched, in roster order:
+
 ```json
 {
   "status": "success",
   "data": {
     "perspectives": [
-      {"label": "GLM", "model_name": "GLM", "code_name": "Alpha", "analysis": "...", "status": "ok", "mode": "translator"},
-      {"label": "Kimi", "model_name": "Kimi", "code_name": "Beta", "analysis": "...", "status": "ok", "mode": "translator"}
+      {"label": "GLM",  "model_name": "GLM",  "code_name": "Alpha", "analysis": "...", "status": "ok",    "mode": "translator"},
+      {"label": "Kimi", "model_name": "Kimi", "code_name": "Beta",  "analysis": "...", "status": "error", "mode": "translator"}
     ],
-    "consensus": {"models_queried": 2, "models_succeeded": 2, "models_failed": 0}
+    "consensus": {"models_queried": 2, "models_succeeded": 1, "models_failed": 1}
   }
 }
 ```
 
+- Failed consultants are returned **in-band** with `status: "error"` and the error text sitting in
+  `analysis`. The call as a whole still reports `"status": "success"` as long as at least one
+  consultant succeeded.
+- `label` is `model_name` normally, or `code_name` when `anonymous_perspectives: true`.
+- `consensus` counts nothing about agreement — despite the name, it is a dispatch tally, and
+  `models_failed` is simply the number of `status: "error"` entries.
+
+**Error shape.**
+
+```json
+{"status": "error", "error": {"code": "...", "message": "...", "type": "...", "details": "..."}, "data": null}
+```
+
+| `code` | Fires when |
+| --- | --- |
+| `INVALID_INPUT` | `context` or `question` is empty or over its character cap |
+| `NO_MATCHING_MODELS` | A `models` array was passed and matched nothing in the fireable window |
+| `NOT_ENOUGH_MODELS_ENABLED` | The fireable roster is empty (startup validation normally prevents this) |
+| `ALL_MODELS_FAILED` | Every consultant errored or the whole batch timed out |
+| `UNKNOWN_TOOL` | Tool name is neither `ai_council` nor `ai_council_list_models` |
+| `INTERNAL_ERROR` | Unhandled exception; `details` carries the Python error string |
+
+`data` is `null` on every error except `ALL_MODELS_FAILED`, which carries
+`{"attempted_models": N, "failed_responses": N}`. Note that no individual analyses survive that
+path — if you need partial results from a slow batch, raise `parallel_timeout` rather than
+retrying.
+
 ---
 
-## How to install the MCP
+## How a call flows
+
+```text
+MCP client (the orchestrator)
+  │ ai_council(context, question, mode?, workspace_root?, scope_hint?, models?)
+  ▼
+main.py::_process_ai_council
+  ├─ validate      context 1..200,000 chars · question 1..10,000 chars   → INVALID_INPUT
+  ├─ roster        config.get_enabled_models()  ==  enabled[:max_models]  ⚠ truncates FIRST
+  └─ subset        if `models` passed: keep roster entries whose name matches
+                   nothing left?  → NO_MATCHING_MODELS
+  ▼
+synthesis.py::collect_perspectives
+  ├─ mode          mode arg > agentic bool > synthesizer_tools.enabled
+  ├─ sandbox       workspace_root arg > config workspace_root > process cwd
+  └─ budget        scholar → scholar_max_tool_iterations · else max_tool_iterations
+  │
+  ├── scribe ───────────► models.py::call_models_parallel
+  │                        one chat call per model · temp 0.7 · max_tokens 8000
+  │                        ⚠ NO concurrency cap — every model fires at once
+  │
+  └── translator ───────► models.py::call_models_parallel_agentic
+      scholar              semaphore = max_concurrent_consultants
+                           per consultant, repeat until it answers or budget runs out:
+                             chat(tools=[read_file,list_dir,glob_search,think])
+                               ├─ tool_calls? → dispatch in sandbox → append results → loop
+                               └─ plain text? → that is the analysis
+                           budget exhausted → one forced "answer from what you have" turn
+                           temp 0.4 · max_tokens 16000
+  ▼
+perspectives[]   one per dispatched model, roster order, failures included
+  ▼
+MCP client weighs them.  No synthesizer runs, in any mode.
+```
+
+#### How a call flows (rendered)
+
+```mermaid
+%%{init: {'themeVariables': {'fontFamily': 'ui-monospace, SFMono-Regular, Menlo, monospace', 'lineColor': '#8b949e'}}}%%
+flowchart TD
+    C([MCP client]) -->|ai_council| V{{"validate<br/>context ≤200k · question ≤10k"}}
+    V -->|invalid| E1[/INVALID_INPUT/]
+    V --> R["roster = first max_models enabled"]
+    R --> S{{"models arg passed?"}}
+    S -->|yes, none match| E2[/NO_MATCHING_MODELS/]
+    S --> M{{"resolve mode"}}
+    M -->|scribe| P["call_models_parallel<br/>no tools · no semaphore"]
+    M -->|translator| A["call_models_parallel_agentic<br/>budget = max_tool_iterations"]
+    M -->|scholar| A2["call_models_parallel_agentic<br/>budget = scholar_max_tool_iterations"]
+    A --> L
+    A2 --> L
+    L{{"tool loop, per consultant<br/>capped by max_concurrent_consultants"}}
+    L -->|tool_calls| T[("sandbox: read_file · list_dir<br/>glob_search · think")]
+    T --> L
+    L -->|plain text| O["one perspective per model<br/>errors included in-band"]
+    P --> O
+    O --> C
+
+    classDef gate stroke-dasharray:4 3;
+    class V,S,M,L gate;
+```
+
+---
+
+## Installation
 
 ### Prerequisites
-- **Python 3.10+**
-- **`uv`/`uvx` installed** — [installation guide](https://docs.astral.sh/uv/getting-started/installation). Verify with `uvx --version`.
-- **For local models:** [Ollama](https://ollama.com) running on `localhost:11434`. Pull the models you want to use (`ollama pull glm-5.2:cloud` etc.).
-- **For paid API models:** the relevant API keys (OpenAI, OpenRouter, DeepSeek, etc.).
 
-### Step 1 — create your config file
+| Need | Why |
+| --- | --- |
+| Python 3.10+ | `requires-python = ">=3.10"` |
+| [`uv` / `uvx`](https://docs.astral.sh/uv/getting-started/installation) | How the server is launched. Verify with `uvx --version`. |
+| [Ollama](https://ollama.com) on `localhost:11434` | Only for local models. Pull tags first (`ollama pull glm-5.2:cloud`), confirm with `ollama list`. |
+| Provider API keys | Only for paid models (OpenAI, OpenRouter, DeepSeek, …). |
 
-Copy the example config from this repo and edit it:
+### Step 1 — write a config file
+
+Start from [`config.example.yaml`](config.example.yaml), which is fully commented:
 
 ```bash
 curl -O https://raw.githubusercontent.com/EzzoHamdan/house-of-wisdom-mcp/master/config.example.yaml
-# edit it: set your models, API keys, and preferred defaults
+mkdir -p ~/.config/ai-council && mv config.example.yaml ~/.config/ai-council/config.yaml
 ```
 
-Or write one from scratch — see `config.example.yaml` in this repo for a fully commented template. The only field you strictly need is `models`.
+`~/.config/ai-council/config.yaml` is the path the server checks when `--config` is omitted. Any
+other location works if you pass `--config /absolute/path.yaml`.
 
-### Step 2 — register the MCP server with your IDE
+⚠ If the path you pass to `--config` does not exist, it is **ignored without an error**. The
+server then boots on built-in defaults, whose roster is three OpenRouter models — so the symptom
+of a typo'd path is usually `OpenRouter API key is required`, not "file not found".
 
-The registration syntax differs per IDE, but the server command is the same everywhere. Pick your client:
+### Step 2 — register the server with your MCP client
 
-#### Kilo Code
-`~/.config/kilo/kilo.json` (or project `kilo.json`):
-```json
-{
-  "mcp": {
-    "ai-council": {
-      "type": "local",
-      "command": ["uvx", "--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master", "ai-council", "--config", "/path/to/your/config.yaml"],
-      "enabled": true,
-      "timeout": 240000
-    }
-  }
-}
+The launch command is identical everywhere; only the surrounding JSON/TOML differs.
+
+```
+command:  uvx
+args:     --from  git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master
+          ai-council
+          --config  /absolute/path/to/config.yaml
 ```
 
-#### Claude Desktop
-`~/.claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+**Claude Desktop** — Settings → Developer → Edit Config, which opens
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
 ```json
 {
   "mcpServers": {
     "ai-council": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master", "ai-council", "--config", "/path/to/your/config.yaml"]
+      "args": ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master",
+               "ai-council", "--config", "/absolute/path/to/config.yaml"]
     }
   }
 }
 ```
 
-#### Claude Code (CLI)
+**Cursor** — same JSON, in `.cursor/mcp.json` (project) or via Settings → MCP (global).
+
+**Kilo Code** — same JSON, in the file opened by the MCP Servers panel
+(*Edit Global MCP* → `mcp_settings.json`, or *Edit Project MCP* → `.kilocode/mcp.json`). Kilo
+kills a server that is slow to answer, so raise its per-server `timeout` if you use `scholar`
+mode:
+
+```json
+{
+  "mcpServers": {
+    "ai-council": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master",
+               "ai-council", "--config", "/absolute/path/to/config.yaml"],
+      "timeout": 240
+    }
+  }
+}
+```
+
+**Claude Code (CLI)** — the `--` separator matters, otherwise `claude` parses `--from` as its own
+flag:
+
 ```bash
-claude mcp add ai-council uvx --from git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master ai-council --config /path/to/your/config.yaml
+claude mcp add ai-council -- uvx --from git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master \
+  ai-council --config /absolute/path/to/config.yaml
 ```
 
-#### Cursor
-`.cursor/mcp.json` in your project, or Settings → MCP:
-```json
-{
-  "mcpServers": {
-    "ai-council": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master", "ai-council", "--config", "/path/to/your/config.yaml"]
-    }
-  }
-}
-```
+**Codex CLI** — `~/.codex/config.toml`:
 
-#### Codex (OpenAI CLI)
-`~/.codex/config.toml`:
 ```toml
 [mcp_servers.ai-council]
 command = "uvx"
-args = ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master", "ai-council", "--config", "/path/to/your/config.yaml"]
+args = ["--from", "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master",
+        "ai-council", "--config", "/absolute/path/to/config.yaml"]
 ```
 
-#### Any other MCP-capable client
-If your client supports stdio MCP servers, it can run this one. The server side is identical; only the registration syntax changes. Check your client's docs for "MCP" support.
+**Anything else** — any client that speaks stdio MCP can run this server. Only the registration
+syntax changes.
 
-### Step 3 — restart your IDE / MCP client
+### Step 3 — restart the client
 
-The server loads your config at startup. After editing the config or upgrading the server, restart the client to pick up changes.
+Config is read once at process start. Every config edit or server upgrade needs a client restart.
 
 ### Step 4 — verify
 
-Ask your AI assistant to call `ai_council_list_models`. It should return your configured roster. Then fire a test council call in SCRIBE mode (fast, no tools) to confirm the models respond.
+1. Call `ai_council_list_models` → your roster comes back.
+2. Call `ai_council` with `mode: "scribe"`, a short `context`, and a short `question` → each model
+   answers. This isolates model connectivity from filesystem/sandbox concerns.
+3. Only then try `translator` with an explicit `workspace_root`.
 
 ---
 
-## Adding, enabling, and disabling consultants
+## Configuration reference
 
-All consultants live in your config file. The server loads them at startup; flip `enabled: true/false` and restart to apply.
+### Every key, with both defaults
 
-### Local Ollama models (free)
+"Built-in" is what you get when the key is absent from your YAML. "Example file" is what
+[`config.example.yaml`](config.example.yaml) ships with — these differ, so do not read the example
+file as documentation of defaults.
+
+| Key | Built-in | Example file | Valid range |
+| --- | --- | --- | --- |
+| `max_models` | `3` | `3` | 1–10 |
+| `parallel_timeout` | `60` | `240` | 5–600 (seconds) |
+| `log_level` | `INFO` | `INFO` | `DEBUG` `INFO` `WARNING` `ERROR` `CRITICAL` |
+| `anonymous_perspectives` | `false` | `false` | boolean |
+| `max_concurrent_consultants` | `3` | `3` | 1–32 |
+| `openai_api_key` | unset | commented out | string |
+| `openrouter_api_key` | unset | commented out | string |
+| `synthesizer_tools.enabled` | `false` | `true` | boolean |
+| `synthesizer_tools.workspace_root` | `null` → process cwd | `null` | absolute path |
+| `synthesizer_tools.max_tool_iterations` | `8` | `12` | 1–128 |
+| `synthesizer_tools.scholar_max_tool_iterations` | `64` | `64` | 1–256 |
+| `synthesizer_tools.allowed_tools` | all four | all four | subset of the four tool names — ⚠ `[]` means **all four**, not none |
+| `models` | 3 OpenRouter models | 6 enabled Ollama + 4 disabled paid | 2–10 entries (10 configured max, 2 enabled min) |
+
+A minimal working config is just:
 
 ```yaml
 models:
-  - name: "GLM"                         # human-readable label shown in perspectives
+  - name: "GLM"
     provider: "custom"
-    model_id: "glm-5.2:cloud"           # the Ollama tag (run `ollama list`)
+    model_id: "glm-5.2:cloud"
     base_url: "http://localhost:11434/v1"
-    api_key: "ollama"                    # any non-empty string works for local Ollama
+    api_key: "ollama"
+    enabled: true
+  - name: "Kimi"
+    provider: "custom"
+    model_id: "kimi-k2.7-code:cloud"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
     enabled: true
 ```
 
-To disable one temporarily: set `enabled: false`. To remove it: delete the block.
+### Startup validation — what stops the server from booting
 
-### Paid OpenAI models
+These are checked at load time. Each exits with `Configuration error: …` on stderr — which your
+MCP client usually surfaces as "server failed to start" — wrapped in a Pydantic `ValidationError`,
+so the strings below appear as a fragment of a longer message rather than on their own.
+
+| Rule | Message contains |
+| --- | --- |
+| At least **2** models must have `enabled: true` | `At least two models must be enabled` |
+| At most **10** models configured in total | `Cannot configure more than 10 models (found N)` |
+| `code_name` values must be unique | `Duplicate code names found in model configuration` |
+| `provider: custom` with **no** `api_key` needs a `base_url` | `Custom endpoints require a base_url` / `Custom endpoints require an api_key` |
+| `provider: openai` needs a key from somewhere | `OpenAI API key is required if using OpenAI models` |
+| `provider: openrouter` needs a key from somewhere | `OpenRouter API key is required if using OpenRouter models` |
+
+⚠ The `custom` rule is weaker than it looks. Validation short-circuits on the presence of
+`api_key`, so a `custom` entry **that has an `api_key` is never checked for `base_url`**. With no
+`base_url`, the client is built against OpenAI's default endpoint — so a local-Ollama entry
+missing its `base_url` boots cleanly and then sends your prompts to `api.openai.com`. Always set
+`base_url` on `custom` entries.
+
+### Model entry fields
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `name` | yes | Human label. This is the string the `models` call argument matches against. |
+| `model_id` | yes | Provider's identifier: an Ollama tag, an OpenRouter slug, an OpenAI model name. |
+| `provider` | no (default `openrouter`) | `openai` \| `openrouter` \| `custom` |
+| `base_url` | for `custom` | OpenAI-compatible `/v1` endpoint. Not enforced when `api_key` is set — see the warning above. |
+| `api_key` | for `custom`, else optional | Overrides the provider-level key for this entry. |
+| `enabled` | no (default `true`) | `false` keeps the entry configured but dormant. |
+| `code_name` | no | Auto-assigned from `Alpha, Beta, Gamma, …` if omitted. Only surfaces when `anonymous_perspectives: true`. ⚠ Setting it by hand on some entries while running close to the 10-model cap can crash startup — see [Sharp edges](#sharp-edges). |
+
+### Consultant recipes
+
+**Local Ollama** — free, `api_key` can be any non-empty string:
 
 ```yaml
-# Add your key at the top of the file (or via env var AI_COUNCIL_OPENAI_API_KEY)
-openai_api_key: "sk-..."
+models:
+  - name: "GLM"
+    provider: "custom"
+    model_id: "glm-5.2:cloud"          # a tag from `ollama list`
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    enabled: true
+```
 
+**OpenAI** — one shared key at the top of the file:
+
+```yaml
+openai_api_key: "sk-..."
 models:
   - name: "GPT-5.6-Terra"
     provider: "openai"
@@ -214,14 +447,11 @@ models:
     enabled: true
 ```
 
-### Paid Anthropic models via OpenRouter
-
-OpenRouter is one API key for many models — see [openrouter.ai/models](https://openrouter.ai/models). This is the easiest way to add Claude, Gemini, and many others with a single key.
+**Claude / Gemini / most others via OpenRouter** — one key, many families. `model_id` is the slug
+from [openrouter.ai/models](https://openrouter.ai/models):
 
 ```yaml
-# Add your key at the top of the file (or via env var AI_COUNCIL_OPENROUTER_API_KEY)
 openrouter_api_key: "sk-or-..."
-
 models:
   - name: "Claude Opus"
     provider: "openrouter"
@@ -233,9 +463,8 @@ models:
     enabled: true
 ```
 
-### Paid DeepSeek models (direct API)
-
-DeepSeek's API is OpenAI-compatible at `https://api.deepseek.com/v1`. Use `provider: custom` with the per-model `api_key` override:
+**DeepSeek direct, Perplexity, Groq, Together, vLLM, LM Studio** — anything OpenAI-compatible uses
+`provider: custom` with its own `base_url` and `api_key`:
 
 ```yaml
 models:
@@ -247,111 +476,186 @@ models:
     enabled: true
 ```
 
-### Any other OpenAI-compatible endpoint
+### API keys — where they are read from
 
-Perplexity, Together, Groq, local vLLM, etc. — same pattern as DeepSeek:
+Per model, first match wins:
 
-```yaml
-models:
-  - name: "Perplexity"
-    provider: "custom"
-    model_id: "llama-3.1-sonar-large-128k-online"
-    base_url: "https://api.perplexity.ai"
-    api_key: "your-perplexity-key"
-    enabled: false
+1. `api_key` on the model entry — always wins for that entry, whatever the provider.
+2. The provider-level key (`openai_api_key` for `provider: openai`, `openrouter_api_key` for
+   `provider: openrouter`), which is itself resolved as **CLI flag → YAML top-level field →
+   environment variable**.
+
+`provider: custom` entries never fall back to a provider-level key; they require their own
+`api_key`.
+
+⚠ **The environment variable names are `OPENAI_API_KEY` and `OPENROUTER_API_KEY` — with no
+prefix.** The `AI_COUNCIL_` prefix that applies to other settings does **not** apply to these two
+fields, because they declare a Pydantic alias and an alias suppresses the prefix. Two consequences:
+
+- `AI_COUNCIL_OPENAI_API_KEY` is silently ignored. ⚠ So are the comments in
+  [`config.example.yaml`](config.example.yaml) that recommend it.
+- Whatever `OPENAI_API_KEY` / `OPENROUTER_API_KEY` already exists in the environment your MCP
+  client launches will be picked up, whether or not you intended it.
+
+Every *other* setting does use the prefix, and matches case-insensitively:
+`AI_COUNCIL_MAX_MODELS`, `AI_COUNCIL_PARALLEL_TIMEOUT`, `AI_COUNCIL_LOG_LEVEL`,
+`AI_COUNCIL_MAX_CONCURRENT_CONSULTANTS`, `AI_COUNCIL_ANONYMOUS_PERSPECTIVES`.
+
+### Who actually fires
+
+Three separate limits, applied in this order:
+
+```text
+configured models        ── enabled: true ──►  enabled models
+enabled models           ── [:max_models] ──►  the fireable window     ⚠ order matters
+the fireable window      ── `models` arg  ──►  this call's roster
+this call's roster       ── semaphore     ──►  N running at once (translator/scholar only)
 ```
 
-### API keys — three ways to pass them
-
-1. **Yaml top-level fields:** `openai_api_key`, `openrouter_api_key` (pulled by models with `provider: openai` / `provider: openrouter`)
-2. **Env vars:** `AI_COUNCIL_OPENAI_API_KEY`, `AI_COUNCIL_OPENROUTER_API_KEY`
-3. **Per-model `api_key` override:** set `api_key` directly on the model entry (used by `provider: custom` models; also overrides the top-level key for `openai`/`openrouter` providers)
-
-### The `max_models` cap
-
-`max_models` (default 3, hard cap 10) controls how many consultants actually run per call. You can configure 8 models and only fire 3 — or use the per-call `models` arg to pick a subset. The first `max_models` enabled models in the list fire by default.
-
-### Mixed local + API considerations
-
-The `max_concurrent_consultants` semaphore (default 3) caps how many consultant loops run at once — this keeps you within Ollama Cloud plan limits (Pro = 3, Max = 10). Paid API models also go through the same semaphore, but since they're remote and fast, capping them at 3 is rarely a bottleneck. If you add many API models and want them unbounded while keeping Ollama capped, that needs a per-provider semaphore (not currently implemented — open an issue if you need it).
+- `max_models` (1–10) truncates by **position in the YAML list**, not by preference. The first
+  three enabled entries are the fireable window.
+- ⚠ The per-call `models` argument filters *the window*, not the full roster. With eight enabled
+  models and `max_models: 3`, asking for the seventh by name returns `NO_MATCHING_MODELS`. To make
+  a model reachable per-call, either raise `max_models` or move its entry up the list.
+- `max_concurrent_consultants` (1–32) caps how many tool loops run simultaneously; the rest queue.
+  Match it to your provider's concurrency allowance (Ollama Cloud Pro = 3, Max = 10).
+  ⚠ It is **not** applied in `scribe` mode — there, every model in the roster fires at once.
 
 ---
 
-## Agentic consultants (TRANSLATOR & SCHOLAR modes)
+## The consultant sandbox
 
-When `synthesizer_tools.enabled: true` in config, TRANSLATOR and SCHOLAR mode calls give every consultant its own **read-only** tool-calling loop sandboxed to `workspace_root`:
+In `translator` and `scholar` modes each consultant gets its own read-only tool loop, rooted at
+`workspace_root`. These tools are internal to the consultant; they are never exposed to your MCP
+client.
 
-| Tool | Purpose |
-|---|---|
-| `read_file(path)` | Read a UTF-8 file inside the sandbox |
-| `list_dir(path)` | List directory entries |
-| `glob_search(pattern)` | Find files by glob pattern |
-| `think(thought)` | Internal reflection step (the council's built-in thinking tool) |
+| Tool | Signature | Behavior |
+| --- | --- | --- |
+| `read_file` | `path` | UTF-8 read, truncated at 200,000 bytes with a `...[truncated]` marker. Undecodable bytes are replaced, not fatal. |
+| `list_dir` | `path` (default root) | One entry per line, relative to root, `/` suffix on directories. |
+| `glob_search` | `pattern` | Glob relative to root, e.g. `**/*.py`. Capped at 100 results. |
+| `think` | `thought` | Echoes the thought back. No I/O. Costs budget on the same terms as the others. |
 
-**Sandbox & safety:**
-- Every path is resolved and checked against `workspace_root` via `Path.resolve()` + `relative_to()`. Symlinks escaping the root are rejected.
-- No write, bash, or network tools — consultants can *look*, not *act*.
-- Hard cap on tool iterations per consultant: `max_tool_iterations` (TRANSLATOR, default 12) or `scholar_max_tool_iterations` (SCHOLAR, default 64). After the cap, a final analysis is forced.
-- Each consultant is told its exact tool budget up front and given an optional `scope_hint`. In TRANSLATOR mode the scope is a cage; in SCHOLAR mode it's a starting point.
+Restrict the set with `synthesizer_tools.allowed_tools`; a call to a tool outside the list returns
+an error string to the model rather than executing. ⚠ An **empty** list is treated as permissive,
+not restrictive — `allowed_tools: []` advertises and permits all four. To actually narrow the
+surface, name the tools you want, e.g. `["read_file", "think"]`.
 
----
+### What never happens
 
-## Configuration reference
+- No writes, no shell, no network from the tools. The four above are the entire surface
+  (`tools.py::ToolRegistry.call`).
+- No read outside `workspace_root`. Paths are resolved with `Path.resolve()` and checked with
+  `relative_to()`, so symlinks pointing out of the root are rejected as `SandboxViolation`
+  (`tools.py::ToolRegistry._resolve`).
+- No tool call at all in `scribe` mode.
+- No endpoint contact from `ai_council_list_models`.
+- No merging of perspectives, in any mode.
 
-```yaml
-# Top-level keys
-max_models: 3                          # how many consultants fire per call (1..10)
-parallel_timeout: 240                   # server-side cap per call, seconds
-log_level: "INFO"                       # DEBUG | INFO | WARNING | ERROR
-anonymous_perspectives: false           # true = label perspectives Alpha/Beta/Gamma; false = real model names
-max_concurrent_consultants: 3           # semaphore cap; Ollama Pro=3, Max=10
+### Budget accounting
 
-# API keys (optional — only needed if you add paid models)
-openai_api_key: "sk-..."
-openrouter_api_key: "sk-or-..."
+The loop stops when the model replies with plain text instead of tool calls, or when the budget is
+spent — after which it gets one forced turn to answer from what it gathered, and a second nudge if
+that comes back empty.
 
-# Agentic consultant tool loop (TRANSLATOR & SCHOLAR modes)
-synthesizer_tools:
-  enabled: true                         # makes TRANSLATOR/SCHOLAR modes available
-  workspace_root: null                  # sandbox default; usually passed per-call
-  max_tool_iterations: 12               # TRANSLATOR mode per-consultant tool budget
-  scholar_max_tool_iterations: 64      # SCHOLAR mode per-consultant tool budget
-  allowed_tools: ["read_file", "list_dir", "glob_search", "think"]
-
-# The consultant roster
-models:
-  - name: "GLM"
-    provider: "custom"
-    model_id: "glm-5.2:cloud"
-    base_url: "http://localhost:11434/v1"
-    api_key: "ollama"
-    enabled: true
-  # ... add more here
-```
+⚠ The budget counts **rounds**, not individual tool calls: one unit per assistant turn that
+contains tool calls, however many it contains. A model that requests four files in a single turn
+spends one unit, not four — and a `think` batched alongside them is free. The system prompt tells
+the model that each call costs one unit, so most models behave as if the stricter accounting were
+real, but a batching model can legitimately read far more of your workspace than the budget number
+suggests.
 
 ---
 
-## CLI args
+## Operational envelope
 
-`--config <path>` (config file) · `--max-models N` · `--parallel-timeout N` · `--log-level DEBUG|INFO|WARNING|ERROR` · `--openai-api-key` · `--openrouter-api-key`
+Values are hardcoded in `models.py`; listed here because they are not otherwise visible from the
+outside.
+
+| Path | Temperature | `max_tokens` | Timeout |
+| --- | --- | --- | --- |
+| `scribe` (`call_model`) | 0.7 | 8,000 | `parallel_timeout`, applied to the whole batch |
+| `translator` / `scholar` (`call_model_with_tools`) | 0.4 | 16,000 | `parallel_timeout`, applied **both** per consultant and to the whole batch |
+
+Empty responses get one automatic retry. Models that return their answer in a `reasoning`,
+`thinking`, or `reasoning_content` field instead of `content` — common with Ollama's cloud
+thinking models — are handled by `models.py::_extract_text`.
+
+⚠ Because `parallel_timeout` also bounds the whole batch, and because queued consultants spend
+their wait inside that window, a `scholar` run with more models than
+`max_concurrent_consultants` needs a generous value. When the batch timeout fires, **every**
+perspective is replaced with a timeout string, including consultants that had already finished,
+and the call returns `ALL_MODELS_FAILED`.
 
 ---
 
-## How it works (v0.4.x architecture)
+## Sharp edges
 
-1. **Orchestrator** (you, the MCP client) decides the question is council-worthy and picks a mode (SCRIBE / TRANSLATOR / SCHOLAR).
-2. **`ai_council_list_models`** (optional) — show the user the roster, let them pick a subset.
-3. **`ai_council`** fires the selected consultants in parallel (concurrency-capped by `max_concurrent_consultants`).
-   - **SCRIBE:** each consultant answers plain-text from `context`. One inference each. No tool calls.
-   - **TRANSLATOR:** each consultant runs a bounded, scope-caged tool loop against `workspace_root`, investigates within scope, then emits its analysis.
-   - **SCHOLAR:** each consultant runs a liberated tool loop with a generous budget, explores broadly, then emits its analysis.
-4. The server returns a **list of independent perspectives** (no synthesizer, no merging), each tagged with the mode it ran in.
-5. The orchestrator reads all perspectives, weighs them, and decides what to do. **Do not treat any single perspective as ground truth.**
+Known divergences between what the system looks like it does and what it does. Each is verified
+in code.
+
+| ⚠ | Detail |
+| --- | --- |
+| Env prefix | `AI_COUNCIL_OPENAI_API_KEY` / `AI_COUNCIL_OPENROUTER_API_KEY` do nothing. Use the unprefixed names. `config.py:105-106` |
+| `models` argument | Filters the post-`max_models` window, so high-index models are unreachable per-call. `main.py:333-336` |
+| `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
+| Concurrency cap | `max_concurrent_consultants` is only honored in `translator`/`scholar`. `models.py::call_models_parallel` has no semaphore. |
+| Batch timeout | Discards the work of consultants that already succeeded. `models.py:494-507` |
+| Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:197` |
+| `status` detection | Decided by prefix-matching the analysis text against strings like `"Error from"` and `"Timeout error"`. Cuts both ways: an answer legitimately opening with one of those words is marked `error`, and the empty-response fallbacks (`"Consultant returned empty content after retry."`) match no prefix, so a consultant that produced nothing is marked `ok`. `synthesis.py:184-190`, `models.py:278,316` |
+| `custom` without `base_url` | Not caught when `api_key` is set; the entry silently talks to `api.openai.com`. `config.py:234-241`, `models.py:92-101` |
+| `allowed_tools: []` | Permits all four tools rather than none. `tools.py:121,237-238` |
+| `anonymous_perspectives` | Changes `label` only. `model_name` and `code_name` are always both present in the payload, so this hides nothing from the orchestrator. |
+| `code_name` auto-assign | Names are drawn from a list that shrinks when you set some by hand, but indexed by absolute position — so 10 configured models with at least one hand-set `code_name` raises `IndexError` at startup and reports as `Failed to start AI Council server`, not `Configuration error`. The example config ships exactly 10 entries. `config.py:185-197` |
+| Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:262-269` |
+| Advertised version | The server announces itself to MCP clients as version `0.2.3` while the package is `0.4.3`. `main.py:438` |
+| `synthesis_model_selection` | Accepted in YAML, never read. No synthesizer exists to select. |
+| Tool budget | Counts assistant turns containing tool calls, not individual calls. |
+| In-client tool description | The `ai_council` description your agent reads calls `translator` the default and quotes a ~12-call budget. Both describe the example config, not the built-in defaults (`scribe`, 8). This table and the [defaults table](#every-key-with-both-defaults) are authoritative. `main.py:148-151` |
+
+---
+
+## CLI arguments
+
+| Flag | Effect |
+| --- | --- |
+| `--config PATH` | Config file. Without it, `~/.config/ai-council/config.yaml` is tried. |
+| `--max-models N` | Overrides `max_models`. |
+| `--parallel-timeout N` | Overrides `parallel_timeout`, in seconds. |
+| `--log-level LEVEL` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. (`CRITICAL` is valid in YAML but not accepted here.) |
+| `--openai-api-key KEY` | Overrides the YAML value. |
+| `--openrouter-api-key KEY` | Overrides the YAML value. |
+
+Logs go to stderr, which is where MCP clients collect server output. `--log-level DEBUG` prints
+every tool call each consultant makes.
+
+---
+
+## Code map
+
+| Concern | Source |
+| --- | --- |
+| MCP wiring, tool schemas, request validation, error shapes | [`ai_council/main.py`](ai_council/main.py) |
+| Mode enum, mode resolution, per-mode prompt suffixes, perspective assembly | [`ai_council/synthesis.py`](ai_council/synthesis.py) |
+| Client construction, parallel dispatch, the tool loop, concurrency semaphore | [`ai_council/models.py`](ai_council/models.py) |
+| Config schema, defaults, startup validation, YAML/env loading | [`ai_council/config.py`](ai_council/config.py) |
+| Sandbox, the four tools, path resolution, tool schemas | [`ai_council/tools.py`](ai_council/tools.py) |
+| Structured stderr logging | [`ai_council/logger.py`](ai_council/logger.py) |
+
+Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). They cover config
+parsing and sandbox path resolution; there is no test that exercises a live model call.
 
 ---
 
 ## Acknowledgments
 
-This project was inspired by [Cognition Wheel](https://github.com/Hormold/cognition-wheel) — the wisdom-of-crowds approach to AI consultation that seeded the multi-model philosophy.
+Inspired by [Cognition Wheel](https://github.com/Hormold/cognition-wheel), which established the
+wisdom-of-crowds approach to multi-model consultation. This project diverges from it in dropping
+the synthesis step entirely, adding the three named modes, giving every consultant its own
+read-only investigation loop, and pushing the weighing of perspectives back onto the caller. The
+medieval House of Wisdom supplied the name and the principle: many lenses, weighed by the reader,
+not merged by an authority.
 
-The v0.4.x line is a significant architectural departure from it: no synthesizer, three named modes (SCRIBE / TRANSLATOR / SCHOLAR), agentic consultants, dynamic concurrency, per-call model selection, and a baked-in decision rule. The medieval House of Wisdom lent the project its name and its guiding principle: diverse perspectives, weighed by the reader, not merged by an authority.
+## License
+
+MIT — see [LICENSE](LICENSE).
