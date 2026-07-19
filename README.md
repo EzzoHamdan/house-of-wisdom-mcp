@@ -591,6 +591,12 @@ Empty responses get one automatic retry. Models that return their answer in a `r
 `thinking`, or `reasoning_content` field instead of `content` — common with Ollama's cloud
 thinking models — are handled by `models.py::_extract_text`.
 
+Per-provider request adaptation (v0.5.2, `models.py::_create_completion`): for `provider: openai`
+the output cap is sent as `max_completion_tokens` instead of `max_tokens` (newer OpenAI models
+reject the latter). If a model still rejects a parameter — e.g. reasoning models accept only the
+default `temperature: 1` — that parameter is dropped and the call retried (up to three strips).
+`custom` / `openrouter` endpoints are sent the classic `max_tokens` / `temperature` unchanged.
+
 ⚠ Because `parallel_timeout` also bounds the whole batch, and because queued consultants spend
 their wait inside that window, a `scholar` run with more models than
 `max_concurrent_consultants` needs a generous value. When the batch timeout fires, only the
