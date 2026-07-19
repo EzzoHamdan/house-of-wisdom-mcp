@@ -95,3 +95,92 @@ def test_gather_marks_raised_exception_as_error():
 
     assert results[0].ok is False
     assert "boom" in results[0].text and "kaboom" in results[0].text
+
+
+# --- Provider-aware completion params (max_tokens / max_completion_tokens) ----
+
+class _UnsupportedParam(Exception):
+    """Mimics OpenAI's 400 for a parameter a model rejects."""
+
+    def __init__(self, param):
+        self.body = {"error": {
+            "code": "unsupported_parameter",
+            "param": param,
+            "message": f"Unsupported parameter: '{param}' is not supported with this model.",
+        }}
+        super().__init__(self.body["error"]["message"])
+
+
+class _FakeCompletions:
+    def __init__(self, reject_once=None):
+        self.calls = []
+        self._reject_once = reject_once
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._reject_once and self._reject_once in kwargs:
+            bad, self._reject_once = self._reject_once, None
+            raise _UnsupportedParam(bad)
+        return "RESPONSE"
+
+
+class _FakeClient:
+    def __init__(self, reject_once=None):
+        self.chat = type("Chat", (), {"completions": _FakeCompletions(reject_once)})()
+
+
+def test_unsupported_param_from_error_body():
+    assert ModelManager._unsupported_param(_UnsupportedParam("max_tokens")) == "max_tokens"
+
+
+def test_unsupported_param_from_message_text():
+    err = Exception("Error code: 400 - 'temperature' is not supported with this model.")
+    assert ModelManager._unsupported_param(err) == "temperature"
+
+
+def test_unsupported_value_temperature_detected():
+    # OpenAI reasoning models reject a non-default temperature with code
+    # 'unsupported_value' and a "does not support" message.
+    err = Exception(
+        "Error code: 400 - Unsupported value: 'temperature' does not support 0.7 "
+        "with this model. Only the default (1) value is supported."
+    )
+    assert ModelManager._unsupported_param(err) == "temperature"
+
+
+def test_unsupported_param_none_for_unrelated_error():
+    assert ModelManager._unsupported_param(Exception("connection reset")) is None
+
+
+def test_openai_gets_max_completion_tokens():
+    mm = _bare_manager()
+    client = _FakeClient()
+    model = ModelConfig(name="G", model_id="gpt-x", provider=Provider.OPENAI)
+    asyncio.run(mm._create_completion(client, model, messages=[], max_tokens=8000))
+    sent = client.chat.completions.calls[0]
+    assert sent.get("max_completion_tokens") == 8000
+    assert "max_tokens" not in sent
+
+
+def test_custom_keeps_max_tokens():
+    mm = _bare_manager()
+    client = _FakeClient()
+    model = ModelConfig(name="C", model_id="glm", provider=Provider.CUSTOM)
+    asyncio.run(mm._create_completion(client, model, messages=[], max_tokens=8000))
+    sent = client.chat.completions.calls[0]
+    assert sent.get("max_tokens") == 8000
+    assert "max_completion_tokens" not in sent
+
+
+def test_rejected_param_is_stripped_and_retried():
+    mm = _bare_manager()
+    client = _FakeClient(reject_once="temperature")
+    model = ModelConfig(name="G", model_id="gpt-x", provider=Provider.OPENAI)
+    result = asyncio.run(
+        mm._create_completion(client, model, messages=[], temperature=0.4, max_tokens=8000)
+    )
+    assert result == "RESPONSE"
+    calls = client.chat.completions.calls
+    assert len(calls) == 2                      # first rejected, second succeeded
+    assert "temperature" not in calls[1]        # offending param dropped on retry
+    assert calls[1].get("max_completion_tokens") == 8000  # token cap preserved

@@ -123,7 +123,55 @@ class ModelManager:
     def get_enabled_models(self) -> List[ModelConfig]:
         """Get list of enabled models up to max_models limit."""
         return self.config.get_enabled_models()
-    
+
+    @staticmethod
+    def _unsupported_param(error: Exception) -> Optional[str]:
+        """Return the parameter name an OpenAI-style 400 says it can't accept.
+
+        Newer OpenAI models reject params the older API accepted, two ways:
+        `unsupported_parameter` (e.g. `max_tokens` — the API wants
+        `max_completion_tokens`) and `unsupported_value` (e.g. reasoning models
+        allow only the default `temperature`). Returns the offending param name,
+        or None if the error is something else.
+        """
+        import re
+        body = getattr(error, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error") or {}
+            if err.get("code") in ("unsupported_parameter", "unsupported_value") and err.get("param"):
+                return err["param"]
+        m = re.search(r"'([A-Za-z_]+)'\s+(?:is not supported|does not support)", str(error))
+        return m.group(1) if m else None
+
+    async def _create_completion(self, client, model_config: ModelConfig, **kwargs):
+        """chat.completions.create with provider-aware params and strip-and-retry
+        for parameters a model rejects as unsupported.
+
+        - OpenAI's newer models renamed the output cap: `max_tokens` becomes
+          `max_completion_tokens`. Custom (OpenAI-compatible / Ollama) and
+          OpenRouter endpoints keep `max_tokens`, so only OpenAI is rewritten.
+        - If the model still rejects a parameter (e.g. reasoning models allow
+          only the default `temperature`), drop that param and retry. Up to
+          three strips before the error is allowed to propagate — enough to
+          shed a chain of rejected params without looping forever.
+        """
+        if "max_tokens" in kwargs and model_config.provider == Provider.OPENAI:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        strips = 0
+        while True:
+            try:
+                return await client.chat.completions.create(model=model_config.model_id, **kwargs)
+            except Exception as error:
+                param = self._unsupported_param(error)
+                if param and param in kwargs and strips < 3:
+                    strips += 1
+                    self.logger.warning(
+                        f"{model_config.name} rejected '{param}'; retrying without it"
+                    )
+                    kwargs.pop(param, None)
+                    continue
+                raise
+
     async def call_model(
         self,
         model_config: ModelConfig,
@@ -153,13 +201,13 @@ class ModelManager:
 
             # Make the API call with better error handling
             try:
-                response = await client.chat.completions.create(
-                    model=model_config.model_id,
+                response = await self._create_completion(
+                    client, model_config,
                     messages=[
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=8000
+                    max_tokens=8000,
                 )
 
                 content = _extract_text(response.choices[0].message)
@@ -169,8 +217,8 @@ class ModelManager:
                     self.logger.debug(
                         f"Empty content from {model_config.name}; nudging once"
                     )
-                    retry = await client.chat.completions.create(
-                        model=model_config.model_id,
+                    retry = await self._create_completion(
+                        client, model_config,
                         messages=[
                             {"role": "user", "content": prompt},
                             {"role": "assistant", "content": ""},
@@ -261,8 +309,8 @@ class ModelManager:
             async def _loop() -> ConsultantResult:
                 nonlocal iterations
                 while True:
-                    response = await client.chat.completions.create(
-                        model=model_config.model_id,
+                    response = await self._create_completion(
+                        client, model_config,
                         messages=messages,
                         tools=tool_schemas,
                         temperature=0.4,
@@ -288,8 +336,8 @@ class ModelManager:
                                 "analysis now as plain text. Do not call any tools."
                             ),
                         })
-                        retry = await client.chat.completions.create(
-                            model=model_config.model_id,
+                        retry = await self._create_completion(
+                            client, model_config,
                             messages=messages,
                             temperature=0.4,
                             max_tokens=16000,
@@ -315,8 +363,8 @@ class ModelManager:
                         )
                         messages.append(msg.model_dump(exclude_none=True))
                         messages.append({"role": "user", "content": force_prompt})
-                        final = await client.chat.completions.create(
-                            model=model_config.model_id,
+                        final = await self._create_completion(
+                            client, model_config,
                             messages=messages,
                             temperature=0.4,
                             max_tokens=16000,
@@ -330,8 +378,8 @@ class ModelManager:
                             "role": "user",
                             "content": "Emit your final analysis now as plain text.",
                         })
-                        final2 = await client.chat.completions.create(
-                            model=model_config.model_id,
+                        final2 = await self._create_completion(
+                            client, model_config,
                             messages=messages,
                             temperature=0.4,
                             max_tokens=16000,
