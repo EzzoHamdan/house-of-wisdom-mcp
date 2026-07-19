@@ -38,7 +38,7 @@ class Perspective(BaseModel):
 
 
 class ModelInfo(BaseModel):
-    """One configured consultant, as returned by ai_council_list_models."""
+    """One configured consultant, as returned by list_models."""
     name: str
     model_id: str
     provider: str
@@ -46,7 +46,7 @@ class ModelInfo(BaseModel):
 
 
 class ModelsListData(BaseModel):
-    """Data returned by ai_council_list_models."""
+    """Data returned by list_models."""
     models: List[ModelInfo]
     max_models: int
     enabled_count: int
@@ -88,6 +88,21 @@ class ErrorResponse(BaseModel):
 AICouncilResponse = Union[SuccessResponse, ErrorResponse]
 
 
+# Public tool names (v0.5.0+). The tools were renamed from "ai_council" and
+# "ai_council_list_models" to the shorter names below. The legacy names are
+# still accepted by the call handler as backward-compatible aliases (see
+# AICouncilServer._canonical_tool) so pre-existing clients or scripts keep
+# working, but only these canonical names are advertised in list_tools.
+TOOL_CONSULT = "consult"
+TOOL_LIST_MODELS = "list_models"
+
+# Legacy name -> canonical name. Kept indefinitely; cheap and breaks nothing.
+_TOOL_ALIASES = {
+    "ai_council": TOOL_CONSULT,
+    "ai_council_list_models": TOOL_LIST_MODELS,
+}
+
+
 class AICouncilServer:
     """Main MCP server for AI Council."""
     
@@ -108,9 +123,21 @@ class AICouncilServer:
             self.logger.error(f"Failed to initialize AI Council Server: {e}")
             raise
         
-        self.server = Server("ai-council")
+        self.server = Server("house-of-wisdom")
         self._setup_handlers()
-    
+
+    @staticmethod
+    def _canonical_tool(name: str) -> Optional[str]:
+        """Resolve a requested tool name to its canonical form, or None if unknown.
+
+        Accepts both the current names (``consult``, ``list_models``) and the
+        legacy names they replaced (``ai_council``, ``ai_council_list_models``),
+        so clients registered before the v0.5.0 rename keep working.
+        """
+        if name in (TOOL_CONSULT, TOOL_LIST_MODELS):
+            return name
+        return _TOOL_ALIASES.get(name)
+
     def _setup_handlers(self):
         """Set up MCP server handlers."""
         
@@ -119,11 +146,11 @@ class AICouncilServer:
             """List available tools."""
             return [
                 Tool(
-                    name="ai_council_list_models",
+                    name=TOOL_LIST_MODELS,
                     description=(
                         "List the configured AI council consultants and whether each is enabled. "
                         "Returns one entry per model: name, model_id, provider, enabled. Call this "
-                        "BEFORE ai_council if you want to show the user their current roster, let them "
+                        "BEFORE consult if you want to show the user their current roster, let them "
                         "pick a subset, or check what's available. This tool does NOT ping endpoints "
                         "and does NOT verify API keys — it only reflects the server's loaded config."
                     ),
@@ -134,12 +161,12 @@ class AICouncilServer:
                     }
                 ),
                 Tool(
-                    name="ai_council",
+                    name=TOOL_CONSULT,
                     description=(
                         "CHOOSING A THINKING TOOL (read first):\n"
                         "- Use the `sequentialthinking` MCP instead when the puzzle needs YOUR OWN focused reasoning "
                         "(decomposing, planning, catching your own mid-reasoning errors). One mind, instant, free.\n"
-                        "- Use THIS tool (ai_council) when you want 3 DIVERSE model families weighing in on the same "
+                        "- Use THIS tool (consult) when you want 3 DIVERSE model families weighing in on the same "
                         "question, not just you. Pick a MODE based on how complex and open the question is:\n"
                         "    * SCRIBE (mode=\"scribe\") — one-shot from given context, NO tool calls, ~10s. Use when "
                         "you have already pre-fed the relevant file/code contents into `context`, or when the "
@@ -155,7 +182,7 @@ class AICouncilServer:
                         "right files to read aren't known in advance. Slowest; bounded by parallel_timeout.\n"
                         "Decision axis: sequentialthinking = focus; SCRIBE = diversity on a settled question; "
                         "TRANSLATOR = diversity + grounding in known material; SCHOLAR = diversity + free inquiry "
-                        "for open questions. Do NOT fire ai_council reflexively on every prompt — only when a "
+                        "for open questions. Do NOT fire consult reflexively on every prompt — only when a "
                         "second/third model family seeing the problem would actually change the outcome.\n\n"
                         "BACKWARD COMPAT: the old `agentic` boolean still works (false→SCRIBE, true→TRANSLATOR) "
                         "but `mode` takes precedence when both are passed.\n\n"
@@ -215,7 +242,11 @@ class AICouncilServer:
         @self.server.call_tool()
         async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
             """Handle tool calls."""
-            if name == "ai_council_list_models":
+            # Normalize legacy tool names (pre-v0.5.0) to their canonical form
+            # so clients registered before the rename keep working.
+            canonical = self._canonical_tool(name)
+
+            if canonical == TOOL_LIST_MODELS:
                 try:
                     result = await self._process_list_models()
                     return [types.TextContent(type="text", text=result.model_dump_json(indent=2))]
@@ -231,17 +262,17 @@ class AICouncilServer:
                     )
                     return [types.TextContent(type="text", text=error_result.model_dump_json(indent=2))]
 
-            if name != "ai_council":
+            if canonical != TOOL_CONSULT:
                 error_result = ErrorResponse(
                     error=ErrorInfo(
                         code="UNKNOWN_TOOL",
                         message=f"Unknown tool: {name}",
                         type="user_input_error",
-                        details=f"The tool '{name}' is not supported. Available tools: ai_council_list_models, ai_council"
+                        details=f"The tool '{name}' is not supported. Available tools: {TOOL_LIST_MODELS}, {TOOL_CONSULT}"
                     )
                 )
                 return [types.TextContent(type="text", text=error_result.model_dump_json(indent=2))]
-            
+
             try:
                 result = await self._process_ai_council(arguments)
                 return [types.TextContent(type="text", text=result.model_dump_json(indent=2))]
@@ -433,8 +464,8 @@ class AICouncilServer:
                 read_stream,
                 write_stream,
                 InitializationOptions(
-                    server_name="ai-council",
-                    server_version="0.2.3",
+                    server_name="house-of-wisdom",
+                    server_version="0.5.0",
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={}
