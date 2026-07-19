@@ -476,7 +476,8 @@ models:
 ```
 
 **DeepSeek direct, Perplexity, Groq, Together, vLLM, LM Studio** — anything OpenAI-compatible uses
-`provider: custom` with its own `base_url` and `api_key`:
+`provider: custom` with its own `base_url` and `api_key`. Use a `${ENV_VAR}` placeholder to keep
+the secret out of the file (see [Keeping keys out of the YAML](#keeping-keys-out-of-the-yaml)):
 
 ```yaml
 models:
@@ -484,7 +485,7 @@ models:
     provider: "custom"
     model_id: "deepseek-chat"
     base_url: "https://api.deepseek.com/v1"
-    api_key: "sk-your-deepseek-key"
+    api_key: "${DEEPSEEK_API_KEY}"   # resolved from the environment at load time
     enabled: true
 ```
 
@@ -510,6 +511,46 @@ All settings use the prefix and match case-insensitively:
 `AI_COUNCIL_OPENAI_API_KEY`, `AI_COUNCIL_OPENROUTER_API_KEY`, `AI_COUNCIL_MAX_MODELS`,
 `AI_COUNCIL_PARALLEL_TIMEOUT`, `AI_COUNCIL_LOG_LEVEL`, `AI_COUNCIL_MAX_CONCURRENT_CONSULTANTS`,
 `AI_COUNCIL_ANONYMOUS_PERSPECTIVES`.
+
+### Keeping keys out of the YAML
+
+The config file describes **structure** (which models, timeouts, modes); secrets belong in the
+**environment**. Keeping `config.yaml` secret-free means you can hand it to an AI agent to edit, or
+even commit it, without leaking a key. Three ways to supply keys without touching the file:
+
+1. **Environment variables** — set the `AI_COUNCIL_`-prefixed names. For MCP the cleanest place is
+   your client's `env` block, so the server inherits them at launch:
+
+   ```json
+   "env": {
+     "AI_COUNCIL_OPENAI_API_KEY": "sk-...",
+     "AI_COUNCIL_OPENROUTER_API_KEY": "sk-or-..."
+   }
+   ```
+
+2. **A `.env` file** — the server reads one next to the config file **and** one in the working
+   directory, before it parses any keys. Use the same `AI_COUNCIL_`-prefixed names; it's gitignored:
+
+   ```dotenv
+   AI_COUNCIL_OPENAI_API_KEY=sk-...
+   AI_COUNCIL_OPENROUTER_API_KEY=sk-or-...
+   ```
+
+   A real environment variable (e.g. from the client `env` block) always wins over the `.env` file.
+
+3. **`${ENV_VAR}` placeholders** — any `api_key` or `base_url` value may reference an env var, which
+   is expanded at load time. This is the **only** secret-free path for a per-model `api_key` on a
+   `provider: custom` entry (DeepSeek, Groq, …), since those never fall back to a provider-level key:
+
+   ```yaml
+   api_key: "${DEEPSEEK_API_KEY}"
+   ```
+
+   A referenced-but-unset variable fails loudly at startup, naming the missing var — it is never
+   silently sent as an empty key.
+
+`config.yaml`, `*.local.yaml`, and `.env` are gitignored, so a filled-in config can't be committed
+by accident.
 
 ### Who actually fires
 
