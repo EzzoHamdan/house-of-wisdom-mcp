@@ -275,10 +275,19 @@ class AICouncilConfig(BaseSettings):
             )
         ]
 
-    def get_enabled_models(self) -> List[ModelConfig]:
-        """Get list of enabled models up to max_models limit."""
+    def get_enabled_models(self, limit: bool = True) -> List[ModelConfig]:
+        """Enabled models.
+
+        ``limit=True`` (default) truncates to ``max_models`` — the DEFAULT
+        fan-out budget, i.e. how many models fire when the caller names none.
+        ``limit=False`` returns the full enabled list and is used to resolve an
+        explicit ``models`` subset: an explicitly named, enabled model must be
+        reachable regardless of file order or ``max_models``. Truncating before
+        the explicit filter would make an enabled model past position N silently
+        unrequestable.
+        """
         enabled = [model for model in self.models if model.enabled]
-        return enabled[:self.max_models]
+        return enabled[:self.max_models] if limit else enabled
 
     def get_log_level(self) -> int:
         """Get logging level as integer constant."""

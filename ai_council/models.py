@@ -120,9 +120,11 @@ class ModelManager:
 
         return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    def get_enabled_models(self) -> List[ModelConfig]:
-        """Get list of enabled models up to max_models limit."""
-        return self.config.get_enabled_models()
+    def get_enabled_models(self, limit: bool = True) -> List[ModelConfig]:
+        """Enabled models. ``limit=True`` caps to ``max_models`` (default
+        fan-out); ``limit=False`` returns the full enabled list for resolving an
+        explicit ``models`` subset. See ``Config.get_enabled_models``."""
+        return self.config.get_enabled_models(limit=limit)
 
     @staticmethod
     def _unsupported_param(error: Exception) -> Optional[str]:

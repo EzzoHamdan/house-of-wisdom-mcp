@@ -365,12 +365,16 @@ class AICouncilServer:
                 )
             )
         
-        # Get enabled models, optionally filtered by the caller's `models` arg.
-        # Unknown names are ignored; if NONE of the requested names match, fail.
-        enabled = self.model_manager.get_enabled_models()
+        # Resolve which models fire. An explicit `models` subset resolves against
+        # the FULL enabled list — a named, enabled model must be reachable
+        # regardless of file order or max_models. The max_models cap applies only
+        # to the default (no-subset) fan-out. Unknown names are ignored; if NONE
+        # of the requested names match, fail. (Actual concurrency is bounded
+        # separately by max_concurrent_consultants.)
         if requested_models:
+            enabled_all = self.model_manager.get_enabled_models(limit=False)
             requested_set = {n.strip() for n in requested_models if n and n.strip()}
-            models = [m for m in enabled if m.name in requested_set]
+            models = [m for m in enabled_all if m.name in requested_set]
             if not models:
                 return ErrorResponse(
                     error=ErrorInfo(
@@ -379,12 +383,12 @@ class AICouncilServer:
                         type="user_input_error",
                         details=(
                             f"Requested: {sorted(requested_set)}. "
-                            f"Available enabled: {[m.name for m in enabled]}."
+                            f"Available enabled: {[m.name for m in enabled_all]}."
                         )
                     )
                 )
         else:
-            models = enabled
+            models = self.model_manager.get_enabled_models()
         if not models:
             return ErrorResponse(
                 error=ErrorInfo(
