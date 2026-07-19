@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from ai_council.config import AICouncilConfig, ModelConfig, Provider
+import pytest
+
+from ai_council.config import (
+    AICouncilConfig,
+    ModelConfig,
+    Provider,
+    _load_dotenv_files,
+    load_config,
+)
 
 
 def _base_models():
@@ -126,6 +134,91 @@ def test_code_names_no_skip_when_earlier_model_is_explicit():
     ])
     assert cfg.models[0].code_name == "Beta"
     assert cfg.models[1].code_name == "Alpha"
+
+
+# --- ${ENV_VAR} interpolation keeps secrets out of the YAML --------------------
+
+def test_env_placeholder_resolved_in_model_api_key(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-real-deepseek")
+    m = ModelConfig(
+        name="DS", provider=Provider.CUSTOM, model_id="deepseek-chat",
+        base_url="https://api.deepseek.com/v1", api_key="${DEEPSEEK_API_KEY}",
+    )
+    assert m.api_key == "sk-real-deepseek"
+
+
+def test_env_placeholder_resolved_in_base_url(monkeypatch):
+    monkeypatch.setenv("LLM_HOST", "http://example.local:8000")
+    m = ModelConfig(
+        name="X", provider=Provider.CUSTOM, model_id="x",
+        base_url="${LLM_HOST}/v1", api_key="k",
+    )
+    assert m.base_url == "http://example.local:8000/v1"
+
+
+def test_env_placeholder_missing_raises_naming_the_var(monkeypatch):
+    monkeypatch.delenv("NO_SUCH_KEY", raising=False)
+    with pytest.raises(ValueError, match="NO_SUCH_KEY"):
+        ModelConfig(
+            name="X", provider=Provider.CUSTOM, model_id="x",
+            base_url="http://x", api_key="${NO_SUCH_KEY}",
+        )
+
+
+def test_literal_key_with_stray_dollar_is_untouched():
+    """A real key that merely contains '$' (but no ${...}) must pass through."""
+    m = ModelConfig(
+        name="X", provider=Provider.CUSTOM, model_id="x",
+        base_url="http://x", api_key="sk-abc$def",
+    )
+    assert m.api_key == "sk-abc$def"
+
+
+def test_env_placeholder_resolved_in_top_level_key(monkeypatch):
+    monkeypatch.setenv("MY_OR_KEY", "sk-or-real")
+    cfg = AICouncilConfig(models=_base_models(), openrouter_api_key="${MY_OR_KEY}")
+    assert cfg.openrouter_api_key == "sk-or-real"
+
+
+# --- .env file loading (config-dir + cwd, real env wins) ----------------------
+
+def test_dotenv_loaded_next_to_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_COUNCIL_OPENAI_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(
+        "# a comment\n"
+        'export AI_COUNCIL_OPENAI_API_KEY="sk-from-dotenv"\n'
+    )
+    _load_dotenv_files(str(tmp_path / "config.yaml"))
+    import os
+    assert os.environ["AI_COUNCIL_OPENAI_API_KEY"] == "sk-from-dotenv"
+
+
+def test_dotenv_does_not_override_real_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_COUNCIL_OPENAI_API_KEY", "sk-from-real-env")
+    (tmp_path / ".env").write_text("AI_COUNCIL_OPENAI_API_KEY=sk-from-dotenv\n")
+    _load_dotenv_files(str(tmp_path / "config.yaml"))
+    import os
+    assert os.environ["AI_COUNCIL_OPENAI_API_KEY"] == "sk-from-real-env"
+
+
+def test_load_config_reads_dotenv_and_applies_prefixed_key(tmp_path, monkeypatch):
+    """End-to-end: a .env beside the config feeds the AI_COUNCIL_-prefixed key."""
+    monkeypatch.delenv("AI_COUNCIL_OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("AI_COUNCIL_OPENROUTER_API_KEY=sk-or-fromenv\n")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  - name: Claude\n"
+        "    provider: openrouter\n"
+        "    model_id: anthropic/claude-opus-4\n"
+        "    enabled: true\n"
+        "  - name: Gemini\n"
+        "    provider: openrouter\n"
+        "    model_id: google/gemini-2.5-pro\n"
+        "    enabled: true\n"
+    )
+    cfg = load_config(str(config_path))
+    assert cfg.openrouter_api_key == "sk-or-fromenv"
 
 
 def test_ten_models_with_one_explicit_name_does_not_crash():

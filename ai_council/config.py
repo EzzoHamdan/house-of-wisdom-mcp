@@ -5,13 +5,55 @@ Follows Pydantic v2 best practices with proper BaseSettings usage.
 """
 
 import logging
+import os
+import re
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Matches ${ENV_VAR} placeholders in config string fields. The name must be a
+# valid shell-style identifier (letters, digits, underscore; not starting with
+# a digit) so a literal key that merely contains a stray "$" is left untouched.
+_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _resolve_env_placeholders(value: Optional[str], field_name: str) -> Optional[str]:
+    """Expand ``${ENV_VAR}`` placeholders in a config string from the environment.
+
+    Lets secrets stay out of the YAML entirely — e.g. ``api_key: "${DEEPSEEK_API_KEY}"``
+    resolves at load time, so the file an agent reads or edits holds no real key.
+
+    A referenced-but-unset variable raises ValueError naming it, so a typo fails
+    loudly at startup instead of sending an empty key to a provider. Values with
+    no ``${...}`` (including None and real keys) pass through unchanged.
+    """
+    if not isinstance(value, str) or "${" not in value:
+        return value
+
+    missing: List[str] = []
+
+    def _sub(match: "re.Match[str]") -> str:
+        var = match.group(1)
+        env_val = os.environ.get(var)
+        if env_val is None:
+            missing.append(var)
+            return match.group(0)
+        return env_val
+
+    resolved = _ENV_PLACEHOLDER.sub(_sub, value)
+    if missing:
+        joined = ", ".join(f"${{{v}}}" for v in missing)
+        raise ValueError(
+            f"{field_name} references environment variable(s) {joined} that are "
+            "not set. Export them (or pass the key via the AI_COUNCIL_-prefixed "
+            "env var / a .env file) before starting the server."
+        )
+    return resolved
 
 
 class Provider(str, Enum):
@@ -39,6 +81,12 @@ class ModelConfig(BaseModel):
     api_key: Optional[str] = Field(default=None, description="API key for this specific model (overrides global keys)")
     code_name: Optional[str] = Field(default=None, description="Anonymous code name for bias reduction (auto-assigned if not provided)")
     enabled: bool = Field(default=True, description="Whether this model is enabled")
+
+    @field_validator("api_key", "base_url")
+    @classmethod
+    def _expand_env(cls, value, info):
+        """Resolve ${ENV_VAR} placeholders so per-model keys can stay out of the YAML."""
+        return _resolve_env_placeholders(value, info.field_name)
 
 
 # Default code names for anonymous model identification
@@ -102,6 +150,12 @@ class AICouncilConfig(BaseSettings):
     # AI_COUNCIL_OPENROUTER_API_KEY (and still from YAML / CLI by field name).
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
     openrouter_api_key: Optional[str] = Field(default=None, description="OpenRouter API key")
+
+    @field_validator("openai_api_key", "openrouter_api_key")
+    @classmethod
+    def _expand_env_keys(cls, value, info):
+        """Resolve ${ENV_VAR} placeholders in provider-level keys set via YAML."""
+        return _resolve_env_placeholders(value, info.field_name)
 
     # Settings with validation
     max_models: int = Field(
@@ -256,17 +310,60 @@ class AICouncilConfig(BaseSettings):
             elif model.provider == Provider.OPENROUTER and not self.openrouter_api_key:
                 raise ValueError("OpenRouter API key is required if using OpenRouter models")
 
+def _load_dotenv_files(config_file: Optional[str]) -> None:
+    """Load ``KEY=VALUE`` pairs from .env files into ``os.environ``.
+
+    Looked up in two places so an MCP server launched from an unpredictable
+    working directory still finds keys placed beside its config:
+
+      1. a ``.env`` next to the resolved config file
+      2. a ``.env`` in the current working directory
+
+    Real environment variables always win — a value already present in
+    ``os.environ`` (e.g. from the MCP client's ``env`` block) is never
+    overwritten. A malformed .env is skipped rather than crashing startup;
+    keys can still come from the environment or the YAML.
+    """
+    candidates: List[Path] = []
+    if config_file:
+        candidates.append(Path(config_file).resolve().parent / ".env")
+    candidates.append(Path.cwd() / ".env")
+
+    seen: set = set()
+    for path in candidates:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            lines = path.read_text().splitlines()
+        except Exception:
+            continue
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
 def load_config(
     config_file: Optional[str] = None,
     **overrides
 ) -> AICouncilConfig:
     """
     Load configuration from file and environment with overrides.
-    
+
     Args:
         config_file: Optional path to YAML config file
         **overrides: Direct field overrides
-    
+
     Returns:
         AICouncilConfig instance
     """
@@ -275,7 +372,11 @@ def load_config(
         default_path = Path.home() / ".config" / "ai-council" / "config.yaml"
         if default_path.exists():
             config_file = str(default_path)
-    
+
+    # Populate the environment from .env files BEFORE constructing the settings,
+    # so AI_COUNCIL_-prefixed keys and any ${ENV_VAR} placeholders can resolve.
+    _load_dotenv_files(config_file)
+
     # Load from YAML file if it exists
     yaml_data = {}
     if config_file and Path(config_file).exists():

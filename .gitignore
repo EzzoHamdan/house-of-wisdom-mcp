@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local config & secrets — NEVER commit these. config.example.yaml is the
+# committed template; your real filled-in config and any .env stay local.
+config.yaml
+*.local.yaml
+.env
+.env.*
+!.env.example

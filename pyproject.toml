@@ -1,6 +1,6 @@
 [project]
 name = "house-of-wisdom-mcp"
-version = "0.5.2"
+version = "0.6.0"
 description = "House of Wisdom MCP — multi-model consultation council. Diverse AI model families investigate independently and return their own perspectives; the orchestrator weighs them. Inspired by the medieval Bayt al-Hikma."
 authors = [{name = "Ezzaldeen Hamdan", email = "ezzham1@gmail.com"}]
 license = {file = "LICENSE"}
@@ -66,5 +66,7 @@ packages = ["ai_council"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/ai_council",
-    "/config.yaml",
+    # Ship the template, never a real config — config.yaml is gitignored and may
+    # hold live secrets on a maintainer's machine.
+    "/config.example.yaml",
 ]

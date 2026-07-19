@@ -25,12 +25,31 @@ max_concurrent_consultants: 3           # semaphore cap on concurrent consultant
                                         # you upgrade — no code changes needed.
 
 # API keys for paid providers (optional — only if you add paid models below).
-# You can also set these via env vars:
-#   AI_COUNCIL_OPENAI_API_KEY
-#   AI_COUNCIL_OPENROUTER_API_KEY
-# Or put a per-model `api_key` directly on the model entry (see DeepSeek below).
-# openai_api_key: "sk-..."
-# openrouter_api_key: "sk-or-..."
+#
+# KEEP SECRETS OUT OF THIS FILE. Because you (or an AI agent) will edit this
+# config, anything you paste here is readable by whoever/whatever opens it.
+# There are three secret-free ways to supply a key; pick whichever suits you:
+#
+#   1. Environment variables (recommended for MCP). The server reads these
+#      AI_COUNCIL_-prefixed names — a bare OPENAI_API_KEY is NOT picked up:
+#        AI_COUNCIL_OPENAI_API_KEY
+#        AI_COUNCIL_OPENROUTER_API_KEY
+#      The clean MCP way is to set them in your client's "env" block, e.g.:
+#        "env": { "AI_COUNCIL_OPENROUTER_API_KEY": "sk-or-..." }
+#
+#   2. A .env file next to this config (or in the working directory). Same
+#      AI_COUNCIL_-prefixed names, one per line — it's gitignored:
+#        AI_COUNCIL_OPENAI_API_KEY=sk-...
+#      (A real environment variable always wins over the .env file.)
+#
+#   3. ${ENV_VAR} placeholders anywhere a key or base_url goes — resolved from
+#      the environment at load time. This is the ONLY secret-free path for
+#      per-model `api_key` on custom providers (see DeepSeek below).
+#
+# You *can* still paste a literal key below, but then it lives in plaintext in
+# a file agents read — avoid it if you can.
+# openai_api_key: "${OPENAI_API_KEY}"
+# openrouter_api_key: "${OPENROUTER_API_KEY}"
 
 # ---------------------------------------------------------------------------
 # Agentic consultant tool loop (TRANSLATOR & SCHOLAR modes)
@@ -128,33 +147,35 @@ models:
   # PAID DEEPSEEK (direct API — OpenAI-compatible)
   # =====================================================================
   # DeepSeek's API is OpenAI-compatible at https://api.deepseek.com/v1.
-  # Use provider=custom + the per-model api_key override (or put the key in a
-  # secret manager and pass via env). Cheaper than going through OpenRouter
-  # for DeepSeek models if you're going to use them heavily.
+  # Use provider=custom + a per-model api_key. Keep the secret out of this file
+  # with a ${ENV_VAR} placeholder — export DEEPSEEK_API_KEY (or set it in a
+  # .env / your client's env block) and it resolves at load time. Cheaper than
+  # going through OpenRouter for DeepSeek models if you use them heavily.
   - name: "DeepSeek-Pro"
     provider: "custom"
     model_id: "deepseek-chat"
     base_url: "https://api.deepseek.com/v1"
-    api_key: "sk-your-deepseek-key-here" # <-- replace with your real key
+    api_key: "${DEEPSEEK_API_KEY}"       # resolved from the environment
     enabled: false
 
   # =====================================================================
   # ANY OTHER OPENAI-COMPATIBLE ENDPOINT
   # =====================================================================
   # Perplexity, Together, Groq, Fireworks, local vLLM, LM Studio, etc. —
-  # same pattern as DeepSeek: provider=custom + base_url + api_key.
+  # same pattern as DeepSeek: provider=custom + base_url + api_key. Use a
+  # ${ENV_VAR} placeholder to keep the key out of this file.
   # Uncomment and edit to add yours.
   # - name: "Perplexity"
   #   provider: "custom"
   #   model_id: "llama-3.1-sonar-large-128k-online"
   #   base_url: "https://api.perplexity.ai"
-  #   api_key: "your-perplexity-key"
+  #   api_key: "${PERPLEXITY_API_KEY}"
   #   enabled: false
   # - name: "Groq Llama"
   #   provider: "custom"
   #   model_id: "llama-3.3-70b-versatile"
   #   base_url: "https://api.groq.com/openai/v1"
-  #   api_key: "your-groq-key"
+  #   api_key: "${GROQ_API_KEY}"
   #   enabled: false
   # - name: "Local vLLM"
   #   provider: "custom"
