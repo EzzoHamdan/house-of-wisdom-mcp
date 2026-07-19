@@ -1,0 +1,164 @@
+# AI Council MCP — example configuration
+#
+# Copy this file to one of these locations and edit it:
+#   ~/.config/ai-council/config.yaml        (default lookup path)
+#   ~/.config/kilo/ai-council.yaml          (Kilo Code convention)
+#   /any/path/you/like.yaml                 (then pass --config /path/to/it.yaml)
+#
+# Then point your MCP client at the server, e.g. for Kilo Code:
+#   "command": ["uvx", "--from",
+#               "git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master",
+#               "ai-council", "--config", "/path/to/this/file.yaml"]
+#
+# Every field below has a default; you only NEED to set `models`.
+
+# ---------------------------------------------------------------------------
+# Top-level settings (all optional — defaults shown)
+# ---------------------------------------------------------------------------
+max_models: 3                          # how many consultants fire per call (1..10)
+parallel_timeout: 240                   # server-side cap per call, in seconds
+log_level: "INFO"                       # DEBUG | INFO | WARNING | ERROR
+anonymous_perspectives: false           # true = label perspectives Alpha/Beta/Gamma
+                                        # false = label by real model name
+max_concurrent_consultants: 3           # semaphore cap on concurrent consultant
+                                        # loops. Ollama Pro=3, Max=10. Bump when
+                                        # you upgrade — no code changes needed.
+
+# API keys for paid providers (optional — only if you add paid models below).
+# You can also set these via env vars:
+#   AI_COUNCIL_OPENAI_API_KEY
+#   AI_COUNCIL_OPENROUTER_API_KEY
+# Or put a per-model `api_key` directly on the model entry (see DeepSeek below).
+# openai_api_key: "sk-..."
+# openrouter_api_key: "sk-or-..."
+
+# ---------------------------------------------------------------------------
+# Agentic consultant tool loop (TRANSLATOR & SCHOLAR modes)
+# When enabled, TRANSLATOR/SCHOLAR mode calls give every consultant its own
+# read-only tool loop sandboxed to workspace_root, so they can investigate
+# the actual codebase before answering. SCRIBE mode is always plain text,
+# no tools, regardless of this setting.
+synthesizer_tools:
+  enabled: true                         # makes TRANSLATOR/SCHOLAR modes available
+  workspace_root: null                  # sandbox default; usually passed per-call
+                                        # via the ai_council tool's workspace_root arg
+  max_tool_iterations: 12               # TRANSLATOR mode per-consultant tool budget
+  scholar_max_tool_iterations: 64      # SCHOLAR mode per-consultant tool budget
+  allowed_tools: ["read_file", "list_dir", "glob_search", "think"]
+
+# ---------------------------------------------------------------------------
+# The consultant roster
+# ---------------------------------------------------------------------------
+# Add one block per consultant. Set `enabled: false` to keep it configured but
+# dormant. The first `max_models` enabled models fire per call (unless the
+# caller passes the per-call `models` arg to pick a subset).
+models:
+  # =====================================================================
+  # LOCAL OLLAMA (free) — any Ollama model works
+  # =====================================================================
+  # base_url is Ollama's OpenAI-compatible endpoint.
+  # api_key can be any non-empty string for local Ollama.
+  # Run `ollama list` to see your installed tags.
+  - name: "GLM"                         # human-readable label shown in perspectives
+    provider: "custom"
+    model_id: "glm-5.2:cloud"           # the Ollama tag
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    enabled: true
+  - name: "Kimi"
+    provider: "custom"
+    model_id: "kimi-k2.7-code:cloud"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    enabled: true
+  - name: "MiniMax"
+    provider: "custom"
+    model_id: "minimax-m3:cloud"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    enabled: true
+  - name: "DeepSeek-Flash"
+    provider: "custom"
+    model_id: "deepseek-v4-flash:cloud"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    enabled: true
+  - name: "Nemotron"
+    provider: "custom"
+    model_id: "nemotron-3-ultra:cloud"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    enabled: true
+  - name: "Gemma"
+    provider: "custom"
+    model_id: "gemma4:31b-cloud"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    enabled: true
+
+  # =====================================================================
+  # PAID OPENAI
+  # =====================================================================
+  # provider=openai pulls the key from openai_api_key above (or env var
+  # AI_COUNCIL_OPENAI_API_KEY). You can also set a per-model api_key override.
+  - name: "GPT-5.6-Terra"
+    provider: "openai"
+    model_id: "gpt-5.6-terra"
+    enabled: false                      # flip to true when you want it in the council
+
+  # =====================================================================
+  # PAID ANTHROPIC / GOOGLE / META / MISTRAL / ETC. VIA OPENROUTER
+  # =====================================================================
+  # OpenRouter is ONE key for MANY models — the easiest way to add Claude,
+  # Gemini, Llama, Mistral, DeepSeek, Qwen, and hundreds more. Browse:
+  #   https://openrouter.ai/models
+  # The model_id is the slug shown there (e.g. anthropic/claude-opus-4).
+  # provider=openrouter pulls the key from openrouter_api_key above (or env var
+  # AI_COUNCIL_OPENROUTER_API_KEY).
+  - name: "Claude Opus"
+    provider: "openrouter"
+    model_id: "anthropic/claude-opus-4"
+    enabled: false
+  - name: "Gemini Pro"
+    provider: "openrouter"
+    model_id: "google/gemini-2.5-pro"
+    enabled: false
+
+  # =====================================================================
+  # PAID DEEPSEEK (direct API — OpenAI-compatible)
+  # =====================================================================
+  # DeepSeek's API is OpenAI-compatible at https://api.deepseek.com/v1.
+  # Use provider=custom + the per-model api_key override (or put the key in a
+  # secret manager and pass via env). Cheaper than going through OpenRouter
+  # for DeepSeek models if you're going to use them heavily.
+  - name: "DeepSeek-Pro"
+    provider: "custom"
+    model_id: "deepseek-chat"
+    base_url: "https://api.deepseek.com/v1"
+    api_key: "sk-your-deepseek-key-here" # <-- replace with your real key
+    enabled: false
+
+  # =====================================================================
+  # ANY OTHER OPENAI-COMPATIBLE ENDPOINT
+  # =====================================================================
+  # Perplexity, Together, Groq, Fireworks, local vLLM, LM Studio, etc. —
+  # same pattern as DeepSeek: provider=custom + base_url + api_key.
+  # Uncomment and edit to add yours.
+  # - name: "Perplexity"
+  #   provider: "custom"
+  #   model_id: "llama-3.1-sonar-large-128k-online"
+  #   base_url: "https://api.perplexity.ai"
+  #   api_key: "your-perplexity-key"
+  #   enabled: false
+  # - name: "Groq Llama"
+  #   provider: "custom"
+  #   model_id: "llama-3.3-70b-versatile"
+  #   base_url: "https://api.groq.com/openai/v1"
+  #   api_key: "your-groq-key"
+  #   enabled: false
+  # - name: "Local vLLM"
+  #   provider: "custom"
+  #   model_id: "your-model-name"
+  #   base_url: "http://localhost:8000/v1"  # vLLM's OpenAI-compatible endpoint
+  #   api_key: "any-non-empty-string"
+  #   enabled: false

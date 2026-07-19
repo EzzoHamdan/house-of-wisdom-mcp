@@ -1,0 +1,123 @@
+"""Tests for the read-only synthesizer tools and sandbox enforcement."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from ai_council.tools import ToolRegistry, filter_schemas, TOOL_SCHEMAS
+
+
+FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "sample_repo"
+
+
+@pytest.fixture
+def registry() -> ToolRegistry:
+    return ToolRegistry(
+        workspace_root=str(FIXTURE_ROOT),
+        allowed_tools=["read_file", "list_dir", "glob_search", "think"],
+    )
+
+
+def test_read_file_inside_sandbox(registry: ToolRegistry):
+    out = registry.read_file("src/math.py")
+    assert "def add" in out
+    assert "def divide" in out
+
+
+def test_read_file_missing(registry: ToolRegistry):
+    out = registry.read_file("src/nope.py")
+    assert "not found" in out.lower()
+
+
+def test_list_dir_lists_entries(registry: ToolRegistry):
+    out = registry.list_dir(".")
+    assert "README.md" in out
+    assert "src/" in out
+
+
+def test_glob_search_finds_python_files(registry: ToolRegistry):
+    out = registry.glob_search("**/*.py")
+    assert "src/math.py" in out
+
+
+def test_think_echoes(registry: ToolRegistry):
+    out = registry.think("step 1: compare answers")
+    assert "step 1" in out
+
+
+def test_sandbox_rejects_outside_path(registry: ToolRegistry):
+    from ai_council.tools import SandboxViolation
+
+    with pytest.raises(SandboxViolation):
+        registry.read_file("../../../../etc/passwd")
+
+
+def test_sandbox_rejects_absolute_outside_path(registry: ToolRegistry):
+    from ai_council.tools import SandboxViolation
+
+    with pytest.raises(SandboxViolation):
+        registry.read_file("/etc/passwd")
+
+
+def test_call_dispatches_by_name(registry: ToolRegistry):
+    out = registry.call("read_file", {"path": "README.md"})
+    assert "Sample Repo" in out
+
+
+def test_call_rejects_disallowed_tool():
+    reg = ToolRegistry(
+        workspace_root=str(FIXTURE_ROOT),
+        allowed_tools=["think"],  # read_file not allowed
+    )
+    out = reg.call("read_file", {"path": "README.md"})
+    assert "not in allowed_tools" in out
+
+
+def test_call_rejects_unknown_tool():
+    # allowed_tools empty => no name gating, so dispatch path is reached
+    reg = ToolRegistry(workspace_root=str(FIXTURE_ROOT), allowed_tools=[])
+    out = reg.call("bogus_tool", {})
+    assert "unknown tool" in out.lower()
+
+
+def test_filter_schemas_subset():
+    filtered = filter_schemas(["read_file", "think"])
+    names = {s["function"]["name"] for s in filtered}
+    assert names == {"read_file", "think"}
+
+
+def test_filter_schemas_empty_allowed_returns_all():
+    filtered = filter_schemas([])
+    assert len(filtered) == len(TOOL_SCHEMAS)
+
+
+def test_workspace_root_must_exist():
+    with pytest.raises(ValueError):
+        ToolRegistry(workspace_root="/nonexistent/path/xyz")
+
+
+def test_relative_path_resolved_against_root(registry: ToolRegistry):
+    # No leading slash — should resolve inside sandbox
+    out = registry.read_file("src/math.py")
+    assert "def add" in out
+
+
+def test_symlink_escape_blocked(tmp_path: Path, registry: ToolRegistry):
+    """A symlink inside the sandbox pointing outside must be rejected."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    link = FIXTURE_ROOT / "escape.txt"
+    try:
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        os.symlink(outside, link)
+        from ai_council.tools import SandboxViolation
+
+        with pytest.raises(SandboxViolation):
+            registry.read_file("escape.txt")
+    finally:
+        if link.exists() or link.is_symlink():
+            link.unlink()
