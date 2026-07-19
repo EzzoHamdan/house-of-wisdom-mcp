@@ -37,8 +37,9 @@ max_concurrent_consultants: 3           # semaphore cap on concurrent consultant
 #      The clean MCP way is to set them in your client's "env" block, e.g.:
 #        "env": { "AI_COUNCIL_OPENROUTER_API_KEY": "sk-or-..." }
 #
-#   2. A .env file next to this config (or in the working directory). Same
-#      AI_COUNCIL_-prefixed names, one per line — it's gitignored:
+#   2. A .env file next to this config (or in the working directory). Copy the
+#      committed .env.example to .env (it's gitignored) and fill it in. Same
+#      AI_COUNCIL_-prefixed names, one per line:
 #        AI_COUNCIL_OPENAI_API_KEY=sk-...
 #      (A real environment variable always wins over the .env file.)
 #

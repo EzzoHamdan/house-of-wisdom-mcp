@@ -529,7 +529,8 @@ even commit it, without leaking a key. Three ways to supply keys without touchin
    ```
 
 2. **A `.env` file** — the server reads one next to the config file **and** one in the working
-   directory, before it parses any keys. Use the same `AI_COUNCIL_`-prefixed names; it's gitignored:
+   directory, before it parses any keys. Copy the committed [`.env.example`](.env.example) to `.env`
+   (it's gitignored) and fill it in; use the same `AI_COUNCIL_`-prefixed names:
 
    ```dotenv
    AI_COUNCIL_OPENAI_API_KEY=sk-...
