@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-19, commit `f729be5`, package version `0.4.3`.
+> **Reflects code as of** — 2026-07-20, commit `7ac2449`, package version `0.6.1`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -122,8 +122,8 @@ Takes no arguments. Returns the configured roster straight from loaded config.
 
 It does **not** contact any endpoint and does **not** validate API keys. `enabled: true` means
 "present in config and not switched off", nothing more. Note that `models` lists every configured
-entry, while only the first `max_models` enabled ones can actually fire — see
-[Who actually fires](#who-actually-fires).
+entry; when a `consult` call names no subset, only the first `max_models` enabled ones fire, but
+**any** enabled model can be requested by name — see [Who actually fires](#who-actually-fires).
 
 ### `consult`
 
@@ -134,7 +134,7 @@ entry, while only the first `max_models` enabled ones can actually fire — see
 | `mode` | string | no | `scribe` \| `translator` \| `scholar`. See [resolution order](#how-the-effective-mode-is-resolved). |
 | `workspace_root` | string | no | Absolute path used as the read-only sandbox root. Ignored in `scribe`. Falls back to `synthesizer_tools.workspace_root`, then to the **server process's current working directory** — which is set by your MCP client, not by you. Pass it explicitly. |
 | `scope_hint` | string | no | Free text injected into each consultant's system prompt, e.g. `"Start with main.py and config.py"`. Ignored in `scribe`. |
-| `models` | array of strings | no | Subset of consultant `name` values to fire. Unknown names are dropped silently; if none survive, the call fails with `NO_MATCHING_MODELS`. ⚠ Selects only within the first `max_models` enabled entries. |
+| `models` | array of strings | no | Subset of consultant `name` values to fire. Resolves against **all** enabled models, so any enabled model is reachable regardless of `max_models` or its position in the YAML. Unknown names are dropped silently; if none survive, the call fails with `NO_MATCHING_MODELS`. Omit to fire the default window (first `max_models` enabled). |
 | `agentic` | boolean | no | Deprecated alias: `false` → `scribe`, `true` → `translator`. Overridden by `mode`. |
 
 **Success shape.** One entry per model that was dispatched, in roster order:
@@ -168,7 +168,7 @@ entry, while only the first `max_models` enabled ones can actually fire — see
 | `code` | Fires when |
 | --- | --- |
 | `INVALID_INPUT` | `context` or `question` is empty or over its character cap |
-| `NO_MATCHING_MODELS` | A `models` array was passed and matched nothing in the fireable window |
+| `NO_MATCHING_MODELS` | A `models` array was passed and matched no enabled model |
 | `NOT_ENOUGH_MODELS_ENABLED` | The fireable roster is empty (startup validation normally prevents this) |
 | `ALL_MODELS_FAILED` | Every consultant errored or the whole batch timed out |
 | `UNKNOWN_TOOL` | Tool name is neither `consult` nor `list_models` |
@@ -189,9 +189,9 @@ MCP client (the orchestrator)
   ▼
 main.py::_process_ai_council
   ├─ validate      context 1..200,000 chars · question 1..10,000 chars   → INVALID_INPUT
-  ├─ roster        config.get_enabled_models()  ==  enabled[:max_models]  ⚠ truncates FIRST
-  └─ subset        if `models` passed: keep roster entries whose name matches
-                   nothing left?  → NO_MATCHING_MODELS
+  └─ roster        `models` passed?  yes → keep FULL enabled list entries whose name matches
+                                          nothing left?  → NO_MATCHING_MODELS
+                                     no  → default window = enabled[:max_models]
   ▼
 synthesis.py::collect_perspectives
   ├─ mode          mode arg > agentic bool > synthesizer_tools.enabled
@@ -223,10 +223,12 @@ MCP client weighs them.  No synthesizer runs, in any mode.
 flowchart TD
     C([MCP client]) -->|consult| V{{"validate<br/>context ≤200k · question ≤10k"}}
     V -->|invalid| E1["INVALID_INPUT"]
-    V --> R["roster = first max_models enabled"]
-    R --> S{{"models arg passed?"}}
-    S -->|yes, none match| E2["NO_MATCHING_MODELS"]
-    S --> M{{"resolve mode"}}
+    V --> S{{"models arg passed?"}}
+    S -->|"yes: match against ALL enabled"| R1["roster = named enabled models"]
+    S -->|"no: default window"| R2["roster = first max_models enabled"]
+    R1 -->|none match| E2["NO_MATCHING_MODELS"]
+    R1 --> M{{"resolve mode"}}
+    R2 --> M
     M -->|scribe| P["call_models_parallel<br/>no tools · no semaphore"]
     M -->|translator| A["call_models_parallel_agentic<br/>budget = max_tool_iterations"]
     M -->|scholar| A2["call_models_parallel_agentic<br/>budget = scholar_max_tool_iterations"]
@@ -555,20 +557,29 @@ by accident.
 
 ### Who actually fires
 
-Three separate limits, applied in this order:
+The per-call roster is built one of two ways, then bounded by concurrency:
 
 ```text
 configured models        ── enabled: true ──►  enabled models
-enabled models           ── [:max_models] ──►  the fireable window     ⚠ order matters
-the fireable window      ── `models` arg  ──►  this call's roster
-this call's roster       ── semaphore     ──►  N running at once (translator/scholar only)
+                              │
+        no `models` arg ◄─────┴─────► `models` arg passed
+              │                              │
+      [:max_models]                  match names against ALL enabled models
+              │                              │
+      default window                 this call's roster (any enabled model, any position)
+              └──────────────┬───────────────┘
+                             ▼
+this call's roster       ── semaphore ──►  N running at once (translator/scholar only)
 ```
 
-- `max_models` (1–10) truncates by **position in the YAML list**, not by preference. The first
-  three enabled entries are the fireable window.
-- ⚠ The per-call `models` argument filters *the window*, not the full roster. With eight enabled
-  models and `max_models: 3`, asking for the seventh by name returns `NO_MATCHING_MODELS`. To make
-  a model reachable per-call, either raise `max_models` or move its entry up the list.
+- `max_models` (1–10) caps the **default** fan-out — the roster used when a call names no subset.
+  The window is the first `max_models` enabled entries by **position in the YAML list**, not by
+  preference.
+- The per-call `models` argument resolves against the **full** enabled list, so any enabled model
+  is reachable by name regardless of `max_models` or its position. With eight enabled models and
+  `max_models: 3`, asking for the seventh by name fires exactly that model. A named subset is not
+  re-capped to `max_models` — the caller chose the models, and `max_concurrent_consultants` still
+  bounds how many run at once.
 - `max_concurrent_consultants` (1–32) caps how many tool loops run simultaneously; the rest queue.
   Match it to your provider's concurrency allowance (Ollama Cloud Pro = 3, Max = 10).
   ⚠ It is **not** applied in `scribe` mode — there, every model in the roster fires at once.
@@ -655,13 +666,20 @@ in code.
 
 | ⚠ | Detail |
 | --- | --- |
-| `models` argument | Filters the post-`max_models` window, so high-index models are unreachable per-call. `main.py:371-373` |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
 | Concurrency cap | `max_concurrent_consultants` is only honored in `translator`/`scholar`. `models.py::call_models_parallel` (the `scribe` path) has no semaphore. |
 | Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:194` |
 | `anonymous_perspectives` | Changes `label` only. `model_name` and `code_name` are always both present in the payload, so this hides nothing from the orchestrator. |
 | Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:274-277` |
 | Tool budget | Counts assistant turns containing tool calls, not individual calls. |
+
+> **Fixed in v0.6.1.** The per-call `models` argument now resolves against the full enabled list,
+> so an explicitly named enabled model is reachable regardless of `max_models` or its position in
+> the YAML. `max_models` again caps only the default (no-subset) fan-out, and the
+> `NO_MATCHING_MODELS` detail reports the true full enabled set. `config.py::get_enabled_models`,
+> `main.py::_process_ai_council`.
+
+<!-- -->
 
 > **Fixed in v0.5.1.** Nine long-standing sharp edges were resolved: the `AI_COUNCIL_` env
 > prefix now works (and a bare `OPENAI_API_KEY` is no longer silently adopted); a batch timeout
