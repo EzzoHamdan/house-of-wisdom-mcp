@@ -13,6 +13,7 @@ from mcp.types import (
 import mcp.types as types
 from pydantic import BaseModel
 
+from . import __version__
 from .models import ModelManager, ConfigValidationError
 from .synthesis import ResponseSynthesizer
 from .logger import AICouncilLogger
@@ -172,18 +173,22 @@ class AICouncilServer:
                         "you have already pre-fed the relevant file/code contents into `context`, or when the "
                         "question is a judgment call that doesn't need codebase verification. Equivalent to the "
                         "old agentic=false.\n"
-                        "    * TRANSLATOR (mode=\"translator\", DEFAULT) — bounded, scope-caged tool loop. Each "
-                        "consultant investigates within the scope_hint and a tight tool budget (~12 calls), then "
-                        "answers. Use for hard problems where the answer must be grounded in specific known "
-                        "files. Equivalent to the old agentic=true. ~30-60s.\n"
-                        "    * SCHOLAR (mode=\"scholar\") — liberated free inquiry. Generous tool budget (~64 "
-                        "calls), scope_hint treated as a starting point not a cage, consultants may follow "
-                        "relevant threads elsewhere in the workspace. Use for genuinely open questions where the "
-                        "right files to read aren't known in advance. Slowest; bounded by parallel_timeout.\n"
+                        "    * TRANSLATOR (mode=\"translator\") — bounded, scope-caged tool loop. Each "
+                        "consultant investigates within the scope_hint under a tight tool budget (the server's "
+                        "configured max_tool_iterations), then answers. Use for hard problems where the answer "
+                        "must be grounded in specific known files. Equivalent to the old agentic=true. ~30-60s.\n"
+                        "    * SCHOLAR (mode=\"scholar\") — liberated free inquiry. Generous tool budget (the "
+                        "server's configured scholar_max_tool_iterations), scope_hint treated as a starting point "
+                        "not a cage, consultants may follow relevant threads elsewhere in the workspace. Use for "
+                        "genuinely open questions where the right files to read aren't known in advance. Slowest; "
+                        "bounded by parallel_timeout.\n"
                         "Decision axis: sequentialthinking = focus; SCRIBE = diversity on a settled question; "
                         "TRANSLATOR = diversity + grounding in known material; SCHOLAR = diversity + free inquiry "
                         "for open questions. Do NOT fire consult reflexively on every prompt — only when a "
                         "second/third model family seeing the problem would actually change the outcome.\n\n"
+                        "DEFAULT MODE: if you omit `mode` (and `agentic`), the server decides from its config — "
+                        "TRANSLATOR when the agentic tool loop is enabled, otherwise SCRIBE (the built-in "
+                        "default). Pass `mode` explicitly when you care which one runs.\n\n"
                         "BACKWARD COMPAT: the old `agentic` boolean still works (false→SCRIBE, true→TRANSLATOR) "
                         "but `mode` takes precedence when both are passed.\n\n"
                         "RETURN SHAPE: a list of independent perspectives (no synthesizer), each tagged with the "
@@ -206,9 +211,10 @@ class AICouncilServer:
                                 "enum": ["scribe", "translator", "scholar"],
                                 "description": (
                                     "SCRIBE = one-shot from context, no tools, ~10s. "
-                                    "TRANSLATOR = bounded, scope-caged tool loop (default). "
+                                    "TRANSLATOR = bounded, scope-caged tool loop. "
                                     "SCHOLAR = liberated free inquiry, generous tool budget, scope as suggestion. "
-                                    "Takes precedence over `agentic` if both are passed."
+                                    "If omitted, the server picks TRANSLATOR when its agentic tool loop is enabled, "
+                                    "else SCRIBE. Takes precedence over `agentic` if both are passed."
                                 )
                             },
                             "workspace_root": {
@@ -383,9 +389,9 @@ class AICouncilServer:
             return ErrorResponse(
                 error=ErrorInfo(
                     code="NOT_ENOUGH_MODELS_ENABLED",
-                    message="Not enough models enabled in configuration",
+                    message="No models available to query",
                     type="configuration_error",
-                    details="At least two models must be enabled in the configuration to process requests"
+                    details="The fireable roster is empty (no enabled models within the max_models window)"
                 )
             )
         
@@ -465,7 +471,7 @@ class AICouncilServer:
                 write_stream,
                 InitializationOptions(
                     server_name="house-of-wisdom",
-                    server_version="0.5.0",
+                    server_version=__version__,
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={}

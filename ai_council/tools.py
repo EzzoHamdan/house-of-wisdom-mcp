@@ -34,7 +34,10 @@ class ToolRegistry:
             raise ValueError(f"workspace_root does not exist: {self.workspace_root}")
         if not self.workspace_root.is_dir():
             raise ValueError(f"workspace_root is not a directory: {self.workspace_root}")
-        self.allowed = set(allowed_tools or [])
+        # None => no allowlist (every tool permitted). [] => an empty allowlist
+        # (no tool permitted). `set(allowed_tools or [])` collapsed those two,
+        # so `allowed_tools=[]` silently permitted everything.
+        self.allowed: Optional[set] = None if allowed_tools is None else set(allowed_tools)
         self.logger = logger or AICouncilLogger()
 
     def _resolve(self, raw_path: str) -> Path:
@@ -118,7 +121,7 @@ class ToolRegistry:
 
     def call(self, name: str, arguments: Dict[str, Any]) -> str:
         """Dispatch a tool call by name. Returns the tool result as a string."""
-        if self.allowed and name not in self.allowed:
+        if self.allowed is not None and name not in self.allowed:
             return f"Error: tool '{name}' is not in allowed_tools"
         dispatch: Dict[str, Callable[..., str]] = {
             "read_file": self.read_file,
@@ -232,9 +235,14 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
 ]
 
 
-def filter_schemas(allowed: List[str]) -> List[Dict[str, Any]]:
-    """Return only the tool schemas whose name is in `allowed`."""
-    if not allowed:
+def filter_schemas(allowed: Optional[List[str]]) -> List[Dict[str, Any]]:
+    """Return the tool schemas permitted by `allowed`.
+
+    ``None`` means no allowlist — every schema is returned. An empty list means
+    an empty allowlist — no schema is returned. (Previously both collapsed to
+    "return everything", so an explicit empty allowlist advertised all tools.)
+    """
+    if allowed is None:
         return TOOL_SCHEMAS
     allowed_set = set(allowed)
     return [s for s in TOOL_SCHEMAS if s["function"]["name"] in allowed_set]

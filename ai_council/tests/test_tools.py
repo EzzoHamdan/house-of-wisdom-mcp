@@ -77,10 +77,24 @@ def test_call_rejects_disallowed_tool():
 
 
 def test_call_rejects_unknown_tool():
-    # allowed_tools empty => no name gating, so dispatch path is reached
-    reg = ToolRegistry(workspace_root=str(FIXTURE_ROOT), allowed_tools=[])
+    # allowed_tools=None => no allowlist gating, so the dispatch path is reached
+    reg = ToolRegistry(workspace_root=str(FIXTURE_ROOT), allowed_tools=None)
     out = reg.call("bogus_tool", {})
     assert "unknown tool" in out.lower()
+
+
+def test_call_empty_allowlist_permits_nothing():
+    # [] is an empty allowlist: every tool is gated out (not "all allowed").
+    reg = ToolRegistry(workspace_root=str(FIXTURE_ROOT), allowed_tools=[])
+    out = reg.call("read_file", {"path": "README.md"})
+    assert "not in allowed_tools" in out
+
+
+def test_call_none_allowlist_permits_all():
+    # None => no allowlist => the tool dispatches normally.
+    reg = ToolRegistry(workspace_root=str(FIXTURE_ROOT), allowed_tools=None)
+    out = reg.call("read_file", {"path": "README.md"})
+    assert "Sample Repo" in out
 
 
 def test_filter_schemas_subset():
@@ -89,9 +103,14 @@ def test_filter_schemas_subset():
     assert names == {"read_file", "think"}
 
 
-def test_filter_schemas_empty_allowed_returns_all():
-    filtered = filter_schemas([])
-    assert len(filtered) == len(TOOL_SCHEMAS)
+def test_filter_schemas_none_returns_all():
+    # None => no allowlist => every schema.
+    assert len(filter_schemas(None)) == len(TOOL_SCHEMAS)
+
+
+def test_filter_schemas_empty_returns_none():
+    # [] => empty allowlist => no schema (previously wrongly returned all).
+    assert filter_schemas([]) == []
 
 
 def test_workspace_root_must_exist():
