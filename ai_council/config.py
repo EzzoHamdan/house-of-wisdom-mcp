@@ -21,12 +21,6 @@ class Provider(str, Enum):
     CUSTOM = "custom"
 
 
-class SynthesisModelSelection(str, Enum):
-    """Synthesis model selection strategy."""
-    RANDOM = "random"
-    FIRST = "first"
-
-
 class LogLevel(str, Enum):
     """Supported log levels."""
     DEBUG = "DEBUG"
@@ -101,9 +95,13 @@ class AICouncilConfig(BaseSettings):
         extra="ignore"
     )
 
-    # API Keys, set alias to disable env prefix
-    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key", alias="openai_api_key")
-    openrouter_api_key: Optional[str] = Field(default=None, description="OpenRouter API key", alias="openrouter_api_key")
+    # API Keys. No alias: an explicit alias makes pydantic-settings skip the
+    # env_prefix, which silently read a bare ambient OPENAI_API_KEY instead of
+    # the documented AI_COUNCIL_OPENAI_API_KEY. Without an alias the env_prefix
+    # applies, so these are read from AI_COUNCIL_OPENAI_API_KEY /
+    # AI_COUNCIL_OPENROUTER_API_KEY (and still from YAML / CLI by field name).
+    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
+    openrouter_api_key: Optional[str] = Field(default=None, description="OpenRouter API key")
 
     # Settings with validation
     max_models: int = Field(
@@ -117,10 +115,6 @@ class AICouncilConfig(BaseSettings):
         ge=5,
         le=600,
         description="Timeout for parallel API calls in seconds"
-    )
-    synthesis_model_selection: SynthesisModelSelection = Field(
-        default=SynthesisModelSelection.RANDOM,
-        description="Strategy for selecting synthesis model"
     )
     log_level: LogLevel = Field(
         default=LogLevel.INFO,
@@ -183,18 +177,26 @@ class AICouncilConfig(BaseSettings):
         self._validate_api_key_requirements(enabled_models)
 
     def _assign_code_names(self) -> None:
-        """Auto-assign code names to models that don't have them."""
-        available_names = DEFAULT_CODE_NAMES.copy()
-        
-        # First pass: remove already used code names from available list
+        """Auto-assign code names to models that don't have them.
+
+        Names already claimed by an explicit ``code_name`` are removed from the
+        pool, then the remaining names are handed out to unassigned models in
+        order. The pool is walked by its own iterator — indexing it by each
+        model's absolute position overran the shrunken list (IndexError at 10
+        models with any explicit name) and skipped names in the normal case.
+        """
+        taken = {model.code_name for model in self.models if model.code_name}
+        pool = iter(name for name in DEFAULT_CODE_NAMES if name not in taken)
+
         for model in self.models:
-            if model.code_name and model.code_name in available_names:
-                available_names.remove(model.code_name)
-        
-        # Second pass: assign code names to models without them
-        for name_index, model in enumerate(self.models):
             if not model.code_name:
-                model.code_name = available_names[name_index]
+                try:
+                    model.code_name = next(pool)
+                except StopIteration:
+                    raise ValueError(
+                        "Ran out of default code names; set code_name explicitly "
+                        f"on each model (only {len(DEFAULT_CODE_NAMES)} defaults exist)."
+                    )
 
     def _get_default_models(self) -> List[ModelConfig]:
         """Get default model configuration for uvx usage."""
@@ -229,16 +231,26 @@ class AICouncilConfig(BaseSettings):
         return getattr(logging, self.log_level.value)
 
     def _validate_api_key_requirements(self, enabled_models: List["ModelConfig"]) -> None:
-        """Validate that required API keys are available for enabled models."""
-        
+        """Validate endpoint structure and API-key availability for enabled models."""
+
         for model in enabled_models:
+            # Structural requirement: a custom endpoint must say WHERE to connect.
+            # This is checked independently of the api_key — every custom model
+            # has a key by definition, so folding it behind an api_key check made
+            # it unreachable and let a base_url-less custom model fall through to
+            # AsyncOpenAI's default (api.openai.com).
+            if model.provider == Provider.CUSTOM and not model.base_url:
+                raise ValueError(
+                    f"Custom endpoint '{model.name}' requires a base_url"
+                )
+
+            # Key-presence checks: a per-model api_key satisfies any provider.
             if model.api_key:
                 continue
-            elif model.provider == Provider.CUSTOM:
-                if not model.base_url:
-                    raise ValueError("Custom endpoints require a base_url")
-                if not model.api_key:
-                    raise ValueError("Custom endpoints require an api_key")
+            if model.provider == Provider.CUSTOM:
+                raise ValueError(
+                    f"Custom endpoint '{model.name}' requires an api_key"
+                )
             elif model.provider == Provider.OPENAI and not self.openai_api_key:
                 raise ValueError("OpenAI API key is required if using OpenAI models")
             elif model.provider == Provider.OPENROUTER and not self.openrouter_api_key:
