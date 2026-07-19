@@ -411,15 +411,16 @@ so the strings below appear as a fragment of a longer message rather than on the
 | At least **2** models must have `enabled: true` | `At least two models must be enabled` |
 | At most **10** models configured in total | `Cannot configure more than 10 models (found N)` |
 | `code_name` values must be unique | `Duplicate code names found in model configuration` |
-| `provider: custom` with **no** `api_key` needs a `base_url` | `Custom endpoints require a base_url` / `Custom endpoints require an api_key` |
+| Every `provider: custom` entry needs a `base_url` | `Custom endpoint '<name>' requires a base_url` |
+| Every `provider: custom` entry needs an `api_key` | `Custom endpoint '<name>' requires an api_key` |
 | `provider: openai` needs a key from somewhere | `OpenAI API key is required if using OpenAI models` |
 | `provider: openrouter` needs a key from somewhere | `OpenRouter API key is required if using OpenRouter models` |
 
-⚠ The `custom` rule is weaker than it looks. Validation short-circuits on the presence of
-`api_key`, so a `custom` entry **that has an `api_key` is never checked for `base_url`**. With no
-`base_url`, the client is built against OpenAI's default endpoint — so a local-Ollama entry
-missing its `base_url` boots cleanly and then sends your prompts to `api.openai.com`. Always set
-`base_url` on `custom` entries.
+The `base_url` requirement is checked independently of `api_key` (v0.5.1). Previously validation
+short-circuited on the presence of `api_key`, so a `custom` entry with a key but no `base_url` was
+never checked and the client fell back to OpenAI's default endpoint — silently sending prompts to
+`api.openai.com`. A base_url-less `custom` entry is now rejected at startup (and guarded again at
+client construction).
 
 ### Model entry fields
 
@@ -499,18 +500,16 @@ Per model, first match wins:
 `provider: custom` entries never fall back to a provider-level key; they require their own
 `api_key`.
 
-⚠ **The environment variable names are `OPENAI_API_KEY` and `OPENROUTER_API_KEY` — with no
-prefix.** The `AI_COUNCIL_` prefix that applies to other settings does **not** apply to these two
-fields, because they declare a Pydantic alias and an alias suppresses the prefix. Two consequences:
+The environment variable names are `AI_COUNCIL_OPENAI_API_KEY` and
+`AI_COUNCIL_OPENROUTER_API_KEY` (v0.5.1 — the fields no longer declare a Pydantic alias, so the
+`AI_COUNCIL_` prefix applies to them like every other setting). A bare, unprefixed
+`OPENAI_API_KEY` / `OPENROUTER_API_KEY` in the environment your MCP client launches is **not**
+picked up — set the prefixed name, or pass the key via YAML or the CLI flags.
 
-- `AI_COUNCIL_OPENAI_API_KEY` is silently ignored. ⚠ So are the comments in
-  [`config.example.yaml`](config.example.yaml) that recommend it.
-- Whatever `OPENAI_API_KEY` / `OPENROUTER_API_KEY` already exists in the environment your MCP
-  client launches will be picked up, whether or not you intended it.
-
-Every *other* setting does use the prefix, and matches case-insensitively:
-`AI_COUNCIL_MAX_MODELS`, `AI_COUNCIL_PARALLEL_TIMEOUT`, `AI_COUNCIL_LOG_LEVEL`,
-`AI_COUNCIL_MAX_CONCURRENT_CONSULTANTS`, `AI_COUNCIL_ANONYMOUS_PERSPECTIVES`.
+All settings use the prefix and match case-insensitively:
+`AI_COUNCIL_OPENAI_API_KEY`, `AI_COUNCIL_OPENROUTER_API_KEY`, `AI_COUNCIL_MAX_MODELS`,
+`AI_COUNCIL_PARALLEL_TIMEOUT`, `AI_COUNCIL_LOG_LEVEL`, `AI_COUNCIL_MAX_CONCURRENT_CONSULTANTS`,
+`AI_COUNCIL_ANONYMOUS_PERSPECTIVES`.
 
 ### Who actually fires
 
@@ -594,9 +593,10 @@ thinking models — are handled by `models.py::_extract_text`.
 
 ⚠ Because `parallel_timeout` also bounds the whole batch, and because queued consultants spend
 their wait inside that window, a `scholar` run with more models than
-`max_concurrent_consultants` needs a generous value. When the batch timeout fires, **every**
-perspective is replaced with a timeout string, including consultants that had already finished,
-and the call returns `ALL_MODELS_FAILED`.
+`max_concurrent_consultants` needs a generous value. When the batch timeout fires, only the
+consultants still running are cancelled and marked as timed out; perspectives that already
+finished are kept (v0.5.1), so a slow straggler no longer collapses a partial success into
+`ALL_MODELS_FAILED`.
 
 ---
 
@@ -607,22 +607,21 @@ in code.
 
 | ⚠ | Detail |
 | --- | --- |
-| Env prefix | `AI_COUNCIL_OPENAI_API_KEY` / `AI_COUNCIL_OPENROUTER_API_KEY` do nothing. Use the unprefixed names. `config.py:105-106` |
-| `models` argument | Filters the post-`max_models` window, so high-index models are unreachable per-call. `main.py:333-336` |
+| `models` argument | Filters the post-`max_models` window, so high-index models are unreachable per-call. `main.py:371-373` |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
-| Concurrency cap | `max_concurrent_consultants` is only honored in `translator`/`scholar`. `models.py::call_models_parallel` has no semaphore. |
-| Batch timeout | Discards the work of consultants that already succeeded. `models.py:494-507` |
-| Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:197` |
-| `status` detection | Decided by prefix-matching the analysis text against strings like `"Error from"` and `"Timeout error"`. Cuts both ways: an answer legitimately opening with one of those words is marked `error`, and the empty-response fallbacks (`"Consultant returned empty content after retry."`) match no prefix, so a consultant that produced nothing is marked `ok`. `synthesis.py:184-190`, `models.py:278,316` |
-| `custom` without `base_url` | Not caught when `api_key` is set; the entry silently talks to `api.openai.com`. `config.py:234-241`, `models.py:92-101` |
-| `allowed_tools: []` | Permits all four tools rather than none. `tools.py:121,237-238` |
+| Concurrency cap | `max_concurrent_consultants` is only honored in `translator`/`scholar`. `models.py::call_models_parallel` (the `scribe` path) has no semaphore. |
+| Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:194` |
 | `anonymous_perspectives` | Changes `label` only. `model_name` and `code_name` are always both present in the payload, so this hides nothing from the orchestrator. |
-| `code_name` auto-assign | Names are drawn from a list that shrinks when you set some by hand, but indexed by absolute position — so 10 configured models with at least one hand-set `code_name` raises `IndexError` at startup and reports as `Failed to start AI Council server`, not `Configuration error`. The example config ships exactly 10 entries. `config.py:185-197` |
-| Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:262-269` |
-| Advertised version | The server announces itself to MCP clients as version `0.2.3` while the package is `0.4.3`. `main.py:438` |
-| `synthesis_model_selection` | Accepted in YAML, never read. No synthesizer exists to select. |
+| Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:274-277` |
 | Tool budget | Counts assistant turns containing tool calls, not individual calls. |
-| In-client tool description | The `consult` description your agent reads calls `translator` the default and quotes a ~12-call budget. Both describe the example config, not the built-in defaults (`scribe`, 8). This table and the [defaults table](#every-key-with-both-defaults) are authoritative. `main.py:148-151` |
+
+> **Fixed in v0.5.1.** Nine long-standing sharp edges were resolved: the `AI_COUNCIL_` env
+> prefix now works (and a bare `OPENAI_API_KEY` is no longer silently adopted); a batch timeout
+> keeps consultants that already finished; `status` is carried explicitly instead of guessed from
+> the text; a `custom` model without `base_url` is rejected instead of talking to `api.openai.com`;
+> `allowed_tools: []` now permits nothing; `code_name` auto-assignment no longer skips names or
+> crashes at 10 models; the advertised version tracks the package; `synthesis_model_selection`
+> (dead) was removed; and the `consult` description no longer quotes example-config defaults.
 
 ---
 
