@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-20, commit `7ac2449`, package version `0.6.1`.
+> **Reflects code as of** — 2026-07-21, `master`, package version `0.6.2`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -200,7 +200,7 @@ synthesis.py::collect_perspectives
   │
   ├── scribe ───────────► models.py::call_models_parallel
   │                        one chat call per model · temp 0.7 · max_tokens 8000
-  │                        ⚠ NO concurrency cap — every model fires at once
+  │                        semaphore = max_concurrent_consultants (same as agentic)
   │
   └── translator ───────► models.py::call_models_parallel_agentic
       scholar              semaphore = max_concurrent_consultants
@@ -229,7 +229,7 @@ flowchart TD
     R1 -->|none match| E2["NO_MATCHING_MODELS"]
     R1 --> M{{"resolve mode"}}
     R2 --> M
-    M -->|scribe| P["call_models_parallel<br/>no tools · no semaphore"]
+    M -->|scribe| P["call_models_parallel<br/>no tools · semaphore-capped"]
     M -->|translator| A["call_models_parallel_agentic<br/>budget = max_tool_iterations"]
     M -->|scholar| A2["call_models_parallel_agentic<br/>budget = scholar_max_tool_iterations"]
     A --> L
@@ -569,7 +569,7 @@ configured models        ── enabled: true ──►  enabled models
       default window                 this call's roster (any enabled model, any position)
               └──────────────┬───────────────┘
                              ▼
-this call's roster       ── semaphore ──►  N running at once (translator/scholar only)
+this call's roster       ── semaphore ──►  N running at once (all modes)
 ```
 
 - `max_models` (1–10) caps the **default** fan-out — the roster used when a call names no subset.
@@ -580,9 +580,10 @@ this call's roster       ── semaphore ──►  N running at once (translat
   `max_models: 3`, asking for the seventh by name fires exactly that model. A named subset is not
   re-capped to `max_models` — the caller chose the models, and `max_concurrent_consultants` still
   bounds how many run at once.
-- `max_concurrent_consultants` (1–32) caps how many tool loops run simultaneously; the rest queue.
-  Match it to your provider's concurrency allowance (Ollama Cloud Pro = 3, Max = 10).
-  ⚠ It is **not** applied in `scribe` mode — there, every model in the roster fires at once.
+- `max_concurrent_consultants` (1–32) caps how many consultants run simultaneously; the rest queue.
+  Match it to your provider's concurrency allowance (Ollama Cloud Pro = 3, Max = 10). It applies in
+  **all** modes — `scribe` included, since v0.6.2 — so a large roster no longer fires every model
+  at once.
 
 ---
 
@@ -668,11 +669,22 @@ in code.
 | ⚠ | Detail |
 | --- | --- |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
-| Concurrency cap | `max_concurrent_consultants` is only honored in `translator`/`scholar`. `models.py::call_models_parallel` (the `scribe` path) has no semaphore. |
 | Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:194` |
 | `anonymous_perspectives` | Changes `label` only. `model_name` and `code_name` are always both present in the payload, so this hides nothing from the orchestrator. |
 | Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:274-277` |
 | Tool budget | Counts assistant turns containing tool calls, not individual calls. |
+
+> **Fixed in v0.6.2.** A full-source audit resolved a batch of defects: `glob_search` no longer
+> escapes the sandbox via `..` patterns; SCHOLAR mode's prompt no longer contradicts itself (mode
+> guidance sits outside the strict scope cage); the budget-exhaustion forced-final turn answers its
+> pending `tool_calls` so strict endpoints no longer 400; `allowed_tools: []` sends an omitted
+> `tools` param instead of `tools: []`; `read_file`'s truncation marker is byte-accurate and its cap
+> is no longer overridable; the `.env` parser strips inline comments. Plus two reliability changes:
+> transient API failures (429 / 5xx / connection) now retry with bounded backoff, and the
+> `max_concurrent_consultants` semaphore applies in `scribe` mode too (it previously fired every
+> model at once). `models.py`, `tools.py`, `synthesis.py`, `config.py`.
+
+<!-- -->
 
 > **Fixed in v0.6.1.** The per-call `models` argument now resolves against the full enabled list,
 > so an explicitly named enabled model is reachable regardless of `max_models` or its position in

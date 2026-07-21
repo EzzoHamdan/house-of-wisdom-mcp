@@ -15,12 +15,12 @@ Anchors point at the code an enhancement would touch.
 | --- | --- | --- | --- | --- |
 | [E1](#e1) | High | Low | ✅ **done** — retry with backoff on rate-limit / transient API errors | `models.py::_create_completion`, `_transient_retry_delay` |
 | [E2](#e2) | High | Med | ✅ **done** — real test coverage for the tool loop, mode resolution, and sandbox | `ai_council/tests/` |
-| [E3](#e3) | Med | Low | Apply a concurrency cap in SCRIBE mode too | `models.py::call_models_parallel` |
-| [E4](#e4) | Med | Low | Cache one `AsyncOpenAI` client per model instead of rebuilding per call | `models.py::_get_client_for_model` |
+| [E3](#e3) | Med | Low | ✅ **done** — apply a concurrency cap in SCRIBE mode too | `models.py::call_models_parallel` |
+| [E4](#e4) | Med | Low | ✅ **done** — cache one `AsyncOpenAI` client per endpoint instead of rebuilding per call | `models.py::_get_client_for_model` |
 | [E5](#e5) | Med | Low | Split per-consultant vs whole-batch timeout | `models.py:302`, `_gather_consultants` |
 | [E6](#e6) | Med | Med | Make `anonymous_perspectives` actually redact `model_name` in the payload | `main.py::Perspective`, `synthesis.py:188-195` |
 | [E7](#e7) | Low | Low | Count individual tool calls, not rounds, against the budget (or restate) | `models.py:355-356` |
-| [E8](#e8) | Low | Low | Drop the unused `models_run` return value | `synthesis.py:197`, `main.py:411` |
+| [E8](#e8) | Low | Low | ✅ **done** — drop the unused `models_run` return value | `synthesis.py::collect_perspectives`, `main.py` |
 | [E9](#e9) | Low | Low | Inject the logger instead of a process-wide singleton | `logger.py::AICouncilLogger` |
 | [E10](#e10) | Low | Low | Optional JSON log format for machine-readable MCP debugging | `logger.py` |
 | [E11](#e11) | Low | Low | Reject duplicate model `name` values at startup | `config.py::model_post_init` |
@@ -73,34 +73,35 @@ several [bugs](bugs-and-issues.md) lived exactly there.
 
 ---
 
-## E3 — concurrency cap in SCRIBE mode {#e3}
+## E3 — concurrency cap in SCRIBE mode {#e3} ✅ done
 
-**Today.** `call_models_parallel` (`models.py:479-490`) fires every model at once with no
-semaphore; `max_concurrent_consultants` is honored only on the agentic path
-(`call_models_parallel_agentic`). Documented as a "sharp edge" in the README, but it's a real
-divergence.
+**Was.** `call_models_parallel` fired every model at once with no semaphore;
+`max_concurrent_consultants` was honored only on the agentic path.
 
-**Change.** Wrap the SCRIBE fan-out in the same `asyncio.Semaphore(max_concurrent_consultants)`
-used by the agentic path.
+**Done.** SCRIBE now wraps each `call_model` in the same
+`asyncio.Semaphore(max_concurrent_consultants)` the agentic path uses; models beyond the cap queue
+and run as slots free up. The `_gather_consultants` timeout handling is unchanged, so a straggler
+still can't collapse the batch.
 
-**Why it matters.** A roster near the 10-model cap in SCRIBE mode can exceed an Ollama plan's
-concurrency (Pro = 3) and trip provider-side 429s — the exact failure E1 then has to paper over.
-Unifying the cap removes the surprise and the README's asterisk.
+**Verified by.** `tests/test_client_and_concurrency.py` — peak concurrency is 1 at cap 1 and 3 at
+cap 3 with a 4-model roster.
 
-**Caveat.** SCRIBE's selling point is ~10 s latency; make the cap default high enough not to
-serialize a small roster, and document that raising it trades latency for provider-limit safety.
+**Note.** The cap now bounds SCRIBE latency too; the default (3) matches Ollama Pro. Raising it
+trades latency for provider-limit safety — the README's SCRIBE "sharp edge" no longer applies.
 
 ---
 
-## E4 — cache the client per model {#e4}
+## E4 — cache the client per endpoint {#e4} ✅ done
 
-**Today.** `_get_client_for_model` (`models.py:81-121`) builds a fresh `AsyncOpenAI` on every call
-and every tool-loop iteration.
+**Was.** `_get_client_for_model` built a fresh `AsyncOpenAI` on every call and every tool-loop
+iteration, discarding connection pooling.
 
-**Change.** Memoize one client per `(base_url, api_key)` on the `ModelManager` and reuse it.
+**Done.** `ModelManager` now memoizes one client per `(base_url, api_key)` in `self._client_cache`
+and reuses it. Models sharing an endpoint+key share a client; distinct endpoints get distinct
+clients.
 
-**Why it matters.** Rebuilding clients discards connection pooling; in a SCHOLAR run with dozens of
-tool rounds this is dozens of throwaway clients per consultant. Low effort, modest latency win.
+**Verified by.** `tests/test_client_and_concurrency.py` — same model reuses its client, same
+endpoint is shared across models, distinct endpoints stay separate.
 
 ---
 
@@ -153,16 +154,15 @@ implies. Low urgency (read-only sandbox), but the prompt currently misstates the
 
 ---
 
-## E8 — drop the unused `models_run` return value {#e8}
+## E8 — drop the unused `models_run` return value {#e8} ✅ done
 
-**Today.** `collect_perspectives` returns `(perspectives, models)` (`synthesis.py:197`); the caller
-unpacks `perspectives, models_run` (`main.py:411`) but then uses the local `models` for all
-counts. `models_run` is always identical to the input `models`.
+**Was.** `collect_perspectives` returned `(perspectives, models)`; the caller unpacked
+`perspectives, models_run` but used the local `models` for all counts. `models_run` was always
+identical to the input.
 
-**Change.** Return only `perspectives` and update the one call site.
-
-**Why it matters.** Removes a misleading second return that implies the set of models can change
-during collection (it can't). Pure simplification.
+**Done.** `collect_perspectives` now returns just `perspectives` (return type `List[Dict]`); the
+`main.py` call site and the two test call sites were updated, and the unused `Tuple` import
+removed. Pure simplification — no behavior change.
 
 ---
 
@@ -212,11 +212,11 @@ it isn't lost. Kept out of the fix batch because tightening validation could rej
 ## Triage summary
 
 ```text
-done:                                E1 retry/backoff · E2 test coverage (89 passing)
-quick wins (low effort):             E3 scribe cap · E4 client cache · E8 dead return
+done:                                E1 retry · E2 tests · E3 scribe cap · E4 client cache · E8 dead return
 deliberate changes (payload/config): E5 timeouts · E6 anonymity · E7 budget wording
 polish:                              E9 logger injection · E10 json logs · E11 dup-name check
 ```
 
-None of the remaining items are blockers; the ordering reflects value-to-effort, not necessity.
-Next natural batch: E3 + E4 + E8 (all in `models.py`, low-risk).
+Suite is **94 passing**. None of the remaining items are blockers; the ordering reflects
+value-to-effort, not necessity. E5/E6/E7 are the "decide the behavior first" set — worth a
+conversation before implementing.
