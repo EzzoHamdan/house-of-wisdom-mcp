@@ -118,6 +118,10 @@ class ModelManager:
     def __init__(self, config: Optional[AICouncilConfig] = None, logger: Optional[AICouncilLogger] = None):
         self.logger = logger or AICouncilLogger()
         self.config = config or load_config()
+        # One AsyncOpenAI per distinct (base_url, api_key). Rebuilding a client
+        # per call — and per tool-loop round — discards connection pooling; a
+        # SCHOLAR run makes dozens of round-trips per consultant.
+        self._client_cache: Dict[tuple, AsyncOpenAI] = {}
         self._apply_log_level()
         self._validate_api_keys()
     
@@ -183,9 +187,15 @@ class ModelManager:
         else:
             # OpenAI uses default base URL (None)
             base_url = None
-        
 
-        return AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # Reuse a client for the same endpoint+key so connection pools persist
+        # across calls and tool-loop rounds.
+        cache_key = (base_url, api_key)
+        client = self._client_cache.get(cache_key)
+        if client is None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            self._client_cache[cache_key] = client
+        return client
 
     def get_enabled_models(self, limit: bool = True) -> List[ModelConfig]:
         """Enabled models. ``limit=True`` caps to ``max_models`` (default
@@ -623,11 +633,24 @@ class ModelManager:
         context: str,
         question: str
     ) -> List[ConsultantResult]:
-        """Call multiple models in parallel, keeping whatever completed."""
+        """Call multiple models in parallel, keeping whatever completed.
+
+        Concurrency is capped by ``max_concurrent_consultants`` — the same
+        semaphore the agentic path uses. Without it a large SCRIBE roster fired
+        every model at once and could exceed a provider's concurrency allowance
+        (e.g. Ollama Cloud Pro = 3), tripping the 429s the retry layer then has
+        to absorb. Models beyond the cap queue and run as slots free up.
+        """
         if not models:
             raise ValueError("No models provided for parallel calls")
 
-        coros = [self.call_model(model, context, question) for model in models]
+        semaphore = asyncio.Semaphore(self.config.max_concurrent_consultants)
+
+        async def _run_one(model):
+            async with semaphore:
+                return await self.call_model(model, context, question)
+
+        coros = [_run_one(model) for model in models]
         return await self._gather_consultants(coros, models, self.config.parallel_timeout)
 
     async def call_models_parallel_agentic(

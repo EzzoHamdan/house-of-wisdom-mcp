@@ -1,6 +1,6 @@
 import os
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from .models import ModelConfig, ModelManager
 from .logger import AICouncilLogger
 from .tools import ToolRegistry, filter_schemas
@@ -79,7 +79,7 @@ class ResponseSynthesizer:
         agentic_override: Optional[bool] = None,
         scope_hint: Optional[str] = None,
         mode: Any = None,
-    ) -> Tuple[List[Dict[str, Any]], List[ModelConfig]]:
+    ) -> List[Dict[str, Any]]:
         """Collect one independent perspective per consultant model.
 
         v0.4.0: there is no synthesizer. Each consultant returns its own
@@ -102,9 +102,10 @@ class ResponseSynthesizer:
                 are None.
 
         Returns:
-            Tuple of (perspectives, models_run) where perspectives is a list
-            of dicts: [{"label": str, "model_name": str, "code_name": str,
-            "analysis": str, "status": "ok"|"error", "mode": str}].
+            The list of perspective dicts: [{"label": str, "model_name": str,
+            "code_name": str, "analysis": str, "status": "ok"|"error",
+            "mode": str}], one per model in ``models`` order. (The model set is
+            never changed during collection, so it is not returned separately.)
         """
         if not models:
             raise ValueError("No models provided")
@@ -198,4 +199,4 @@ class ResponseSynthesizer:
                 "mode": mode.value,
             })
 
-        return perspectives, models
+        return perspectives

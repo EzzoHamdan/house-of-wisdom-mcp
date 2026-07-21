@@ -408,7 +408,7 @@ class AICouncilServer:
         self.logger.info("Dispatching calls to all consultants in parallel")
         parallel_start = time.time()
 
-        perspectives, models_run = await self.synthesizer.collect_perspectives(
+        perspectives = await self.synthesizer.collect_perspectives(
             context, question, models,
             workspace_root_override=workspace_root,
             agentic_override=agentic_override,

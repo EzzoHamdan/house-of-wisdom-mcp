@@ -45,7 +45,7 @@ def test_status_derived_from_ok_flag_not_text_prefix():
     ]
     synth = ResponseSynthesizer(_FakeModelManager(config, results))
 
-    perspectives, _ = asyncio.run(
+    perspectives = asyncio.run(
         synth.collect_perspectives("ctx", "question", models, mode="scribe")
     )
 

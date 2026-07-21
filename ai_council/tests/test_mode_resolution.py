@@ -61,35 +61,35 @@ def test_from_agentic_mapping():
 # --- precedence through collect_perspectives ---------------------------------
 def test_explicit_mode_wins_over_agentic(monkeypatch):
     synth, cfg, calls = _synth(monkeypatch, tools_enabled=False)
-    persp, _ = _run(synth, cfg, mode="scholar", agentic_override=False)
+    persp = _run(synth, cfg, mode="scholar", agentic_override=False)
     assert calls["path"] == "agentic"          # scholar is agentic despite agentic=False
     assert persp[0]["mode"] == "scholar"
 
 
 def test_scribe_mode_forces_no_tools(monkeypatch):
     synth, cfg, calls = _synth(monkeypatch, tools_enabled=True)
-    persp, _ = _run(synth, cfg, mode="scribe")
+    persp = _run(synth, cfg, mode="scribe")
     assert calls["path"] == "scribe"
     assert persp[0]["mode"] == "scribe"
 
 
 def test_agentic_bool_used_when_no_mode(monkeypatch):
     synth, cfg, calls = _synth(monkeypatch, tools_enabled=False)
-    persp, _ = _run(synth, cfg, agentic_override=True)
+    persp = _run(synth, cfg, agentic_override=True)
     assert calls["path"] == "agentic"
     assert persp[0]["mode"] == "translator"
 
 
 def test_config_default_used_when_neither_passed(monkeypatch):
     synth, cfg, calls = _synth(monkeypatch, tools_enabled=True)
-    persp, _ = _run(synth, cfg)
+    persp = _run(synth, cfg)
     assert calls["path"] == "agentic"
     assert persp[0]["mode"] == "translator"
 
 
 def test_unknown_mode_falls_back_to_config(monkeypatch):
     synth, cfg, calls = _synth(monkeypatch, tools_enabled=False)
-    persp, _ = _run(synth, cfg, mode="nonsense")
+    persp = _run(synth, cfg, mode="nonsense")
     assert calls["path"] == "scribe"          # fell through to config default (disabled)
     assert persp[0]["mode"] == "scribe"
 
