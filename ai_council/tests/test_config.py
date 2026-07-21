@@ -251,3 +251,29 @@ def test_ten_models_with_one_explicit_name_does_not_crash():
     names = [m.code_name for m in cfg.models]
     assert names[0] == "Zeta"
     assert len(set(names)) == 10  # every model got a distinct name
+
+
+def test_duplicate_model_names_rejected():
+    """Two models sharing a name make `models`-arg selection ambiguous (E11)."""
+    models = [
+        ModelConfig(name="Twin", provider=Provider.CUSTOM, model_id="a",
+                    base_url="http://x", api_key="k"),
+        ModelConfig(name="Twin", provider=Provider.CUSTOM, model_id="b",
+                    base_url="http://x", api_key="k"),
+    ]
+    with pytest.raises(ValueError, match="Duplicate model names"):
+        AICouncilConfig(models=models)
+
+
+def test_log_format_defaults_to_text():
+    from ai_council.config import LogFormat
+
+    cfg = AICouncilConfig(models=_base_models())
+    assert cfg.log_format == LogFormat.TEXT
+
+
+def test_log_format_parsed_from_value():
+    from ai_council.config import LogFormat
+
+    cfg = AICouncilConfig(models=_base_models(), log_format="json")
+    assert cfg.log_format == LogFormat.JSON

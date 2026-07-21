@@ -495,6 +495,7 @@ def main():
     parser.add_argument("--openrouter-api-key", help="OpenRouter API key")
     parser.add_argument("--max-models", type=int, help="Maximum number of models to use")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Log level")
+    parser.add_argument("--log-format", choices=["text", "json"], help="Log rendering format")
     parser.add_argument("--config", help="Path to config file")
     parser.add_argument("--parallel-timeout", type=int, help="Timeout for parallel calls")
     
@@ -512,6 +513,8 @@ def main():
                 config_kwargs['max_models'] = args.max_models
             if args.log_level:
                 config_kwargs['log_level'] = args.log_level
+            if args.log_format:
+                config_kwargs['log_format'] = args.log_format
             if args.parallel_timeout:
                 config_kwargs['parallel_timeout'] = args.parallel_timeout
             

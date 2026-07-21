@@ -123,6 +123,7 @@ class ModelManager:
         # SCHOLAR run makes dozens of round-trips per consultant.
         self._client_cache: Dict[tuple, AsyncOpenAI] = {}
         self._apply_log_level()
+        self._apply_log_format()
         self._validate_api_keys()
     
     def _apply_log_level(self) -> None:
@@ -135,6 +136,13 @@ class ModelManager:
             import logging
             self.logger.set_level(logging.INFO)
     
+    def _apply_log_format(self) -> None:
+        """Apply the configured log format (text/json) to the shared handler."""
+        try:
+            self.logger.set_format(self.config.log_format.value)
+        except Exception as e:
+            self.logger.warning(f"Failed to apply log format: {e}")
+
     def _validate_api_keys(self) -> None:
         """Validate that required API keys are available."""
         if self.config.openai_api_key:

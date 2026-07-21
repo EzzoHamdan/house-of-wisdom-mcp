@@ -72,6 +72,12 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class LogFormat(str, Enum):
+    """Log rendering: human text or one JSON object per line."""
+    TEXT = "text"
+    JSON = "json"
+
+
 class ModelConfig(BaseModel):
     """Configuration for a single AI model."""
     name: str = Field(..., min_length=1, description="Human-readable name of the model")
@@ -174,6 +180,10 @@ class AICouncilConfig(BaseSettings):
         default=LogLevel.INFO,
         description="Logging level"
     )
+    log_format: LogFormat = Field(
+        default=LogFormat.TEXT,
+        description="Log rendering: 'text' (human) or 'json' (one object per line)"
+    )
 
     # Models configuration
     models: List[ModelConfig] = Field(
@@ -218,6 +228,13 @@ class AICouncilConfig(BaseSettings):
         # Auto-assign code names if not provided
         self._assign_code_names()
         
+        # Validate unique model names. The per-call `models` argument selects
+        # consultants by `name`; a duplicate makes that selection (and the
+        # returned label) ambiguous, so reject it at startup.
+        names = [model.name for model in self.models]
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate model names found in model configuration")
+
         # Validate unique code names
         code_names = [model.code_name for model in self.models if model.code_name]
         if len(code_names) != len(set(code_names)):
