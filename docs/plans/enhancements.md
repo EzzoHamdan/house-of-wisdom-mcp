@@ -13,8 +13,8 @@ Anchors point at the code an enhancement would touch.
 
 | ID | Value | Effort | Enhancement | Anchor |
 | --- | --- | --- | --- | --- |
-| [E1](#e1) | High | Low | Retry with backoff on rate-limit / transient API errors | `models.py::call_model`, `_create_completion` |
-| [E2](#e2) | High | Med | Real test coverage for the tool loop, mode resolution, and sandbox | `ai_council/tests/` |
+| [E1](#e1) | High | Low | ✅ **done** — retry with backoff on rate-limit / transient API errors | `models.py::_create_completion`, `_transient_retry_delay` |
+| [E2](#e2) | High | Med | ✅ **done** — real test coverage for the tool loop, mode resolution, and sandbox | `ai_council/tests/` |
 | [E3](#e3) | Med | Low | Apply a concurrency cap in SCRIBE mode too | `models.py::call_models_parallel` |
 | [E4](#e4) | Med | Low | Cache one `AsyncOpenAI` client per model instead of rebuilding per call | `models.py::_get_client_for_model` |
 | [E5](#e5) | Med | Low | Split per-consultant vs whole-batch timeout | `models.py:302`, `_gather_consultants` |
@@ -27,45 +27,49 @@ Anchors point at the code an enhancement would touch.
 
 ---
 
-## E1 — retry with backoff on transient failures {#e1}
+## E1 — retry with backoff on transient failures {#e1} ✅ done
 
-**Today.** `call_model` (`models.py:239-247`) maps `rate_limit` / `auth` substrings to friendlier
-errors but never retries — one 429 or dropped connection fails that consultant for the whole call.
-`_create_completion` (`models.py:162-175`) retries only to *strip unsupported params*, not for
-transient network/HTTP errors.
+**Was.** `call_model` mapped `rate_limit` / `auth` substrings to friendlier errors but never
+retried — one 429 or dropped connection failed that consultant for the whole call.
+`_create_completion` retried only to *strip unsupported params*, not for transient network/HTTP
+errors.
 
-**Change.** Add a small bounded retry (2–3 attempts, exponential backoff with jitter) around the
-completion call for retryable classes: HTTP 429, 500/502/503, connection resets, timeouts. Respect
-a `Retry-After` header when present. Keep it inside `parallel_timeout` so the batch bound still
-holds.
+**Done.** `_create_completion` now backs off and retries on transient classes: HTTP 429 / 500 /
+502 / 503 / 504 and connection/timeout exceptions (matched by `status_code` or exception type name
+— `models.py::_transient_retry_delay`). It honors a numeric `Retry-After` header when present, else
+uses exponential backoff (`RETRY_BASE_DELAY * 2^attempt`) plus jitter, clamped to `RETRY_MAX_DELAY`
+(8 s). Retries are capped at `RETRY_MAX_ATTEMPTS` (2 extra attempts). The unsupported-param
+strip-and-retry is unchanged and takes precedence. The batch/consultant timeouts still bound total
+wall-clock, so a retry loop can't outlive its window. Tunables are class attributes so tests lower
+them.
 
-**Why it matters.** Ollama Cloud and OpenRouter both rate-limit under concurrency; a transient 429
-currently turns a consultant into a permanent `status: "error"`, degrading the council for no
-durable reason. Highest value-to-effort item here.
-
-**Caveat.** Backoff competes with `parallel_timeout`; cap attempts so a slow retry loop can't
-consume the whole window a healthy consultant needs.
+**Verified by.** `tests/test_retry.py` — 429/connection retried then succeed, 400 raised
+immediately with no sleep, attempts exhaust to propagation, `Retry-After` honored and clamped.
 
 ---
 
-## E2 — real test coverage for the loop, modes, and sandbox {#e2}
+## E2 — real test coverage for the loop, modes, and sandbox {#e2} ✅ done
 
-**Today.** 62 tests pass but cover config parsing, tool-name plumbing, and path resolution. There
-is no test for: the tool-calling loop (`call_model_with_tools`), mode resolution precedence
-(`CouncilMode.from_agentic` + the `mode` arg), the SCRIBE/TRANSLATOR/SCHOLAR prompt assembly, the
-glob sandbox boundary, or `.env` parsing edge cases. The README itself notes "there is no test that
-exercises a live model call."
+**Was.** 62 tests covered config parsing, tool-name plumbing, and path resolution only. No test
+exercised the tool-calling loop, mode-resolution precedence, prompt assembly, the glob sandbox
+boundary, or `.env` edge cases.
 
-**Change.** Add tests with a stubbed OpenAI client (a fake returning canned `tool_calls` then final
-text) so the loop is exercised without a network:
-- budget exhaustion forces a final answer;
-- `status` reflects `ConsultantResult.ok`, not text prefixes;
-- mode precedence matrix (`mode` > `agentic` > config default);
-- sandbox: `glob_search("../*")` is empty, symlink-out is rejected, truncation marker correctness
-  (guards [B1](bugs-and-issues.md#b1), [B3](bugs-and-issues.md#b3)).
+**Done.** Coverage now runs the trickiest logic against a stubbed OpenAI client (no network):
 
-**Why it matters.** The trickiest logic (tool loop, mode resolution) is the least tested; several
-[bugs](bugs-and-issues.md) live exactly there and would have been caught.
+| Area | Test file |
+| --- | --- |
+| Tool-loop message contract (forced-final answers pending `tool_calls`; empty `tools` omitted) | `tests/test_tool_loop.py` |
+| Transient-retry backoff | `tests/test_retry.py` |
+| Mode precedence (`mode` > `agentic` > config default), unknown-mode fallback, scholar budget, empty-content nudge | `tests/test_mode_resolution.py` |
+| SCRIBE/TRANSLATOR/SCHOLAR prompt assembly (scope cage vs mode guidance) | `tests/test_prompt_assembly.py` |
+| Glob sandbox boundary, truncation marker, cap non-override | `tests/test_tools.py` |
+| `.env` inline-comment parsing | `tests/test_config.py` |
+
+Suite is **89 passing** (was 62). Remaining gap: no test hits a *live* model endpoint — by design;
+all model I/O is stubbed.
+
+**Why it mattered.** The tool loop and mode resolution were the least-tested and highest-risk code;
+several [bugs](bugs-and-issues.md) lived exactly there.
 
 ---
 
@@ -208,11 +212,11 @@ it isn't lost. Kept out of the fix batch because tightening validation could rej
 ## Triage summary
 
 ```text
-do-first (high value, low effort):   E1 retry/backoff
-build-confidence (unblocks safety):  E2 test coverage  →  guards the bug fixes
+done:                                E1 retry/backoff · E2 test coverage (89 passing)
 quick wins (low effort):             E3 scribe cap · E4 client cache · E8 dead return
 deliberate changes (payload/config): E5 timeouts · E6 anonymity · E7 budget wording
-polish:                              E9 logger injection · E10 json logs
+polish:                              E9 logger injection · E10 json logs · E11 dup-name check
 ```
 
-None of these are blockers; the ordering reflects value-to-effort, not necessity.
+None of the remaining items are blockers; the ordering reflects value-to-effort, not necessity.
+Next natural batch: E3 + E4 + E8 (all in `models.py`, low-risk).
