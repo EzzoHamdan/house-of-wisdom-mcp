@@ -16,3 +16,6 @@ config.yaml
 .env
 .env.*
 !.env.example
+
+# Task handoffs are shared out-of-band, never committed (planning-flow)
+docs/tasks/

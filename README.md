@@ -381,7 +381,7 @@ file as documentation of defaults.
 | `synthesizer_tools.workspace_root` | `null` → process cwd | `null` | absolute path |
 | `synthesizer_tools.max_tool_iterations` | `8` | `12` | 1–128 |
 | `synthesizer_tools.scholar_max_tool_iterations` | `64` | `64` | 1–256 |
-| `synthesizer_tools.allowed_tools` | all four | all four | subset of the four tool names — ⚠ `[]` means **all four**, not none |
+| `synthesizer_tools.allowed_tools` | all four | all four | subset of the four tool names — ⚠ omit the key (**null**) for all four; `[]` permits **none** |
 | `models` | 3 OpenRouter models | 6 enabled Ollama + 4 disabled paid | 2–10 entries (10 configured max, 2 enabled min) |
 
 A minimal working config is just:
@@ -600,9 +600,10 @@ client.
 | `think` | `thought` | Echoes the thought back. No I/O. Costs budget on the same terms as the others. |
 
 Restrict the set with `synthesizer_tools.allowed_tools`; a call to a tool outside the list returns
-an error string to the model rather than executing. ⚠ An **empty** list is treated as permissive,
-not restrictive — `allowed_tools: []` advertises and permits all four. To actually narrow the
-surface, name the tools you want, e.g. `["read_file", "think"]`.
+an error string to the model rather than executing. ⚠ Distinguish the two "empty" cases: **omitting
+the key** (null) permits all four, while `allowed_tools: []` permits **none** — an empty allowlist
+advertises no tools, so every consultant loses read access. To narrow the surface, name the tools
+you want, e.g. `["read_file", "think"]`; to grant everything, leave the key out.
 
 ### What never happens
 
