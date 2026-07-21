@@ -39,6 +39,29 @@ class ToolRegistry:
         # so `allowed_tools=[]` silently permitted everything.
         self.allowed: Optional[set] = None if allowed_tools is None else set(allowed_tools)
         self.logger = logger or AICouncilLogger()
+        # --- Activity record -------------------------------------------------
+        # One registry is built per consultant, so these accumulate exactly one
+        # consultant's investigation. They are reported back to the orchestrator
+        # so it can see WHICH evidence each perspective actually rests on: two
+        # consultants disagreeing matters far less when one of them never opened
+        # the relevant file. Ordered by first touch, deduplicated.
+        self.files_read: List[str] = []
+        self.paths_listed: List[str] = []
+        self.call_counts: Dict[str, int] = {}
+
+    def _record(self, bucket: List[str], rel_path: str) -> None:
+        """Append to an activity list, preserving order and skipping repeats."""
+        if rel_path not in bucket:
+            bucket.append(rel_path)
+
+    @property
+    def activity(self) -> Dict[str, Any]:
+        """A snapshot of what this consultant actually touched."""
+        return {
+            "files_read": list(self.files_read),
+            "paths_listed": list(self.paths_listed),
+            "tool_calls": dict(self.call_counts),
+        }
 
     def _resolve(self, raw_path: str) -> Path:
         """Resolve a path strictly inside workspace_root.
@@ -82,6 +105,9 @@ class ToolRegistry:
         text = raw[: self.MAX_READ_BYTES].decode("utf-8", errors="replace")
         if truncated:
             text += f"\n...[truncated at {self.MAX_READ_BYTES} bytes]"
+        # Record only reads that actually returned content — a miss or a
+        # sandbox rejection is not evidence the consultant's answer rests on.
+        self._record(self.files_read, resolved.relative_to(self.workspace_root).as_posix())
         return text
 
     def list_dir(self, path: str = ".") -> str:
@@ -100,6 +126,7 @@ class ToolRegistry:
             rel = entry.relative_to(self.workspace_root)
             suffix = "/" if entry.is_dir() else ""
             lines.append(f"{rel}{suffix}")
+        self._record(self.paths_listed, resolved.relative_to(self.workspace_root).as_posix() or ".")
         return "\n".join(lines) if lines else "(empty directory)"
 
     def glob_search(self, pattern: str, max_results: int = 100) -> str:
@@ -151,6 +178,9 @@ class ToolRegistry:
         fn = dispatch.get(name)
         if fn is None:
             return f"Error: unknown tool '{name}'"
+        # Count every dispatched call, including ones that go on to fail — the
+        # count measures effort spent, unlike files_read which measures evidence.
+        self.call_counts[name] = self.call_counts.get(name, 0) + 1
         try:
             return fn(**arguments)
         except SandboxViolation as e:

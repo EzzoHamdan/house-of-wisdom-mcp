@@ -1,6 +1,7 @@
 import os
+from dataclasses import asdict
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from .models import ModelConfig, ModelManager
 from .logger import AICouncilLogger
 from .tools import ToolRegistry, filter_schemas
@@ -75,6 +76,7 @@ class ResponseSynthesizer:
         agentic_override: Optional[bool] = None,
         scope_hint: Optional[str] = None,
         mode: Any = None,
+        progress_cb: Optional[Callable[[int, int, str], Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Collect one independent perspective per consultant model.
 
@@ -164,6 +166,7 @@ class ResponseSynthesizer:
                     max_iterations=max_iter,
                     scope_hint=scope_hint or None,
                     mode_guidance=mode_guidance or None,
+                    progress_cb=progress_cb,
                 )
             except Exception as e:
                 self.logger.error(
@@ -171,11 +174,11 @@ class ResponseSynthesizer:
                     f"plain parallel calls: {e}"
                 )
                 analyses = await self.model_manager.call_models_parallel(
-                    models, context, question
+                    models, context, question, progress_cb=progress_cb
                 )
         else:
             analyses = await self.model_manager.call_models_parallel(
-                models, context, question
+                models, context, question, progress_cb=progress_cb
             )
 
         perspectives: List[Dict[str, Any]] = []
@@ -191,6 +194,12 @@ class ResponseSynthesizer:
                 "analysis": result.text,
                 "status": "ok" if result.ok else "error",
                 "mode": mode.value,
+                # v0.7.0: what this consultant spent and what it actually read.
+                # Deliberately NOT a judgment — the server still merges nothing.
+                # It is evidence the orchestrator can weigh: a perspective whose
+                # `files_read` is empty was not grounded in the codebase at all,
+                # however confident its prose sounds.
+                "telemetry": asdict(result.telemetry),
             })
 
         return perspectives

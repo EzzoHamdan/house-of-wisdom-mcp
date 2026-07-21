@@ -11,7 +11,7 @@ from mcp.types import (
     Tool
 )
 import mcp.types as types
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import __version__
 from .models import ModelManager, ConfigValidationError
@@ -22,10 +22,40 @@ from .config import load_config
 
 # Response Models
 class ConsensusInfo(BaseModel):
-    """Information about model consensus."""
+    """Dispatch tally for the call. Despite the name it measures nothing about
+    agreement — see the README. v0.7.0 adds the batch's aggregate cost."""
     models_queried: int
     models_succeeded: int
     models_failed: int
+    # Wall-clock, not the sum of per-consultant durations: consultants run in
+    # parallel, so summing them would report a number nobody actually waited.
+    wall_clock_s: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    # None when no participating model carries pricing in config — a local
+    # Ollama roster has no dollar cost, and 0.0 would read as "measured as free"
+    # rather than "not priced".
+    total_cost_usd: Optional[float] = None
+
+
+class PerspectiveTelemetry(BaseModel):
+    """What one consultant spent, and what it actually looked at (v0.7.0).
+
+    `files_read` is the load-bearing field: it is the difference between a
+    perspective grounded in the codebase and one that merely sounds grounded.
+    Two consultants disagreeing matters far less when only one of them opened
+    the file in question.
+    """
+    duration_s: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    api_calls: int = 0
+    cost_usd: Optional[float] = None
+    tool_rounds_used: int = 0
+    tool_rounds_budget: Optional[int] = None
+    files_read: List[str] = Field(default_factory=list)
+    paths_listed: List[str] = Field(default_factory=list)
+    tool_calls: Dict[str, int] = Field(default_factory=dict)
 
 
 class Perspective(BaseModel):
@@ -36,6 +66,7 @@ class Perspective(BaseModel):
     analysis: str
     status: str  # "ok" | "error"
     mode: str = "translator"  # "scribe" | "translator" | "scholar" (v0.4.3+)
+    telemetry: PerspectiveTelemetry = Field(default_factory=PerspectiveTelemetry)
 
 
 class ModelInfo(BaseModel):
@@ -104,6 +135,32 @@ _TOOL_ALIASES = {
 }
 
 
+# Server-level instructions, sent once at initialize and surfaced by MCP clients
+# as always-in-context text — unlike a tool description, which many clients load
+# lazily (or never, if the tool list is deferred behind a search). This is the
+# only text guaranteed to reach the orchestrator, so it must stand alone: say
+# what the server does, name the tool, and give concrete reasons to reach for it.
+# Keep it short — it costs context on every single turn.
+SERVER_INSTRUCTIONS = (
+    "House of Wisdom asks the same question to several different AI model families "
+    "at once and returns every answer separately, unmerged — one complete, "
+    "independent analysis per model. There is no synthesizer: you read the "
+    "perspectives and decide.\n\n"
+    "Use the `consult` tool when a second or third independent mind would "
+    "plausibly change your answer:\n"
+    "- The user asks for a second opinion, a sanity check, or a review of your reasoning.\n"
+    "- A design, architecture, or trade-off decision is genuinely contested.\n"
+    "- You have been circling the same bug or explanation without converging.\n"
+    "- A conclusion is high-stakes or hard to reverse and deserves independent verification.\n"
+    "- You want blind spots surfaced — a different model family often catches what one mind misses.\n\n"
+    "The simplest valid call passes `question` alone; every other argument is "
+    "optional and the server picks sane defaults. Use `list_models` first when the "
+    "user should choose which consultants answer.\n\n"
+    "Each call spends several model API calls and takes tens of seconds, so it is "
+    "worth reaching for deliberately rather than on every turn."
+)
+
+
 class AICouncilServer:
     """Main MCP server for AI Council."""
     
@@ -124,7 +181,11 @@ class AICouncilServer:
             self.logger.error(f"Failed to initialize AI Council Server: {e}")
             raise
         
-        self.server = Server("house-of-wisdom")
+        self.server = Server(
+            "house-of-wisdom",
+            version=__version__,
+            instructions=SERVER_INSTRUCTIONS,
+        )
         self._setup_handlers()
 
     @staticmethod
@@ -164,57 +225,46 @@ class AICouncilServer:
                 Tool(
                     name=TOOL_CONSULT,
                     description=(
-                        "CHOOSING A THINKING TOOL (read first):\n"
-                        "- Use the `sequentialthinking` MCP instead when the puzzle needs YOUR OWN focused reasoning "
-                        "(decomposing, planning, catching your own mid-reasoning errors). One mind, instant, free.\n"
-                        "- Use THIS tool (consult) when you want 3 DIVERSE model families weighing in on the same "
-                        "question, not just you. Pick a MODE based on how complex and open the question is:\n"
-                        "    * SCRIBE (mode=\"scribe\") — one-shot from given context, NO tool calls, ~10s. Use when "
-                        "you have already pre-fed the relevant file/code contents into `context`, or when the "
-                        "question is a judgment call that doesn't need codebase verification. Equivalent to the "
-                        "old agentic=false.\n"
-                        "    * TRANSLATOR (mode=\"translator\") — bounded, scope-caged tool loop. Each "
-                        "consultant investigates within the scope_hint under a tight tool budget (the server's "
-                        "configured max_tool_iterations), then answers. Use for hard problems where the answer "
-                        "must be grounded in specific known files. Equivalent to the old agentic=true. ~30-60s.\n"
-                        "    * SCHOLAR (mode=\"scholar\") — liberated free inquiry. Generous tool budget (the "
-                        "server's configured scholar_max_tool_iterations), scope_hint treated as a starting point "
-                        "not a cage, consultants may follow relevant threads elsewhere in the workspace. Use for "
-                        "genuinely open questions where the right files to read aren't known in advance. Slowest; "
-                        "bounded by parallel_timeout.\n"
-                        "Decision axis: sequentialthinking = focus; SCRIBE = diversity on a settled question; "
-                        "TRANSLATOR = diversity + grounding in known material; SCHOLAR = diversity + free inquiry "
-                        "for open questions. Do NOT fire consult reflexively on every prompt — only when a "
-                        "second/third model family seeing the problem would actually change the outcome.\n\n"
-                        "DEFAULT MODE: if you omit `mode` (and `agentic`), the server decides from its config — "
-                        "TRANSLATOR when the agentic tool loop is enabled, otherwise SCRIBE (the built-in "
-                        "default). Pass `mode` explicitly when you care which one runs.\n\n"
-                        "BACKWARD COMPAT: the old `agentic` boolean still works (false→SCRIBE, true→TRANSLATOR) "
-                        "but `mode` takes precedence when both are passed.\n\n"
-                        "RETURN SHAPE: a list of independent perspectives (no synthesizer), each tagged with the "
-                        "mode it ran in. You (the orchestrator) read all perspectives and weigh them yourself — "
-                        "do not treat any single one as ground truth."
+                        "Ask the same question to several different AI model families at once and get back "
+                        "every answer, unmerged — one complete, independent analysis per model.\n\n"
+                        "USE IT WHEN:\n"
+                        "- The user asks for a second opinion, a sanity check, or a review of your reasoning.\n"
+                        "- A design, architecture, or trade-off decision is genuinely contested.\n"
+                        "- You have been circling the same bug or explanation without converging.\n"
+                        "- A conclusion is high-stakes or hard to reverse and deserves independent verification.\n"
+                        "- You want blind spots surfaced — a different model family often catches what one "
+                        "mind misses.\n\n"
+                        "SIMPLEST CALL: pass `question` alone. Every other argument is optional and the server "
+                        "picks sane defaults.\n\n"
+                        "OPTIONAL DEPTH (`mode`) — omit it and the server chooses for you:\n"
+                        "- scribe — answers from whatever you put in `context`; no file access; fastest.\n"
+                        "- translator — each consultant reads the files you point it at, then answers.\n"
+                        "- scholar — each consultant investigates the workspace freely; deepest, slowest.\n"
+                        "translator and scholar need `workspace_root` (an absolute path).\n\n"
+                        "RETURNS: one independent perspective per model, each tagged with the mode it ran in. "
+                        "There is no synthesizer — read them all and weigh them yourself; do not treat any "
+                        "single one as ground truth."
                     ),
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "context": {
-                                "type": "string",
-                                "description": "Important background information and context. For SCRIBE mode, paste the file/code contents here (up to 200k chars). For TRANSLATOR/SCHOLAR, brief context is enough — the consultants will read files themselves."
-                            },
                             "question": {
                                 "type": "string",
-                                "description": "The specific, detailed question you want answered."
+                                "description": "The specific, detailed question you want answered. This is the only required argument."
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Optional background. A sentence or two is usually plenty. Only worth filling in at length for scribe mode, which cannot read files — there, paste the relevant code or docs (up to 200k chars)."
                             },
                             "mode": {
                                 "type": "string",
                                 "enum": ["scribe", "translator", "scholar"],
                                 "description": (
-                                    "SCRIBE = one-shot from context, no tools, ~10s. "
-                                    "TRANSLATOR = bounded, scope-caged tool loop. "
-                                    "SCHOLAR = liberated free inquiry, generous tool budget, scope as suggestion. "
-                                    "If omitted, the server picks TRANSLATOR when its agentic tool loop is enabled, "
-                                    "else SCRIBE. Takes precedence over `agentic` if both are passed."
+                                    "Optional. scribe = answers from `context` only, no file access, fastest. "
+                                    "translator = bounded investigation within `scope_hint`. "
+                                    "scholar = free investigation of the workspace, generous tool budget. "
+                                    "If omitted, the server picks translator when its tool loop is enabled, else "
+                                    "scribe. Takes precedence over `agentic` if both are passed."
                                 )
                             },
                             "workspace_root": {
@@ -240,7 +290,7 @@ class AICouncilServer:
                                 )
                             }
                         },
-                        "required": ["context", "question"]
+                        "required": ["question"]
                     }
                 )
             ]
@@ -295,13 +345,17 @@ class AICouncilServer:
                 return [types.TextContent(type="text", text=error_result.model_dump_json(indent=2))]
     
     def _validate_input(self, context: str, question: str) -> None:
-        """Validate input parameters."""
-        if not context or not context.strip():
-            raise ValueError("Context cannot be empty")
-        
+        """Validate input parameters.
+
+        Only `question` is required. `context` was required until v0.7.0, but a
+        mandatory field the caller must author before it can call at all is a
+        real barrier to the tool ever being used — and it bought nothing, since
+        translator/scholar consultants read the workspace themselves and scribe
+        can still answer a judgment question from the wording alone.
+        """
         if not question or not question.strip():
             raise ValueError("Question cannot be empty")
-        
+
         # Length validation — generous context limit to support pre-feeding
         # large file contents (v0.4.1 pre-feed pattern).
         if len(context) > 200000:
@@ -310,6 +364,39 @@ class AICouncilServer:
         if len(question) > 10000:
             raise ValueError("Question too long (max 10,000 characters)")
     
+    def _make_progress_cb(self):
+        """Build a per-consultant progress reporter bound to the current request.
+
+        A consult runs silently for tens of seconds, which reads as a hang to
+        both the user and the calling agent — and a tool that looks hung is a
+        tool that stops getting called. MCP clients opt in by sending a
+        `progressToken` in the request `_meta`; when they do, each consultant
+        that finishes emits a notification.
+
+        Returns None when the client did not ask for progress, or when there is
+        no active request context (direct calls in tests). The council runs
+        identically either way — this is reporting, never control flow.
+        """
+        try:
+            ctx = self.server.request_context
+        except LookupError:
+            return None
+
+        token = getattr(ctx.meta, "progressToken", None) if ctx.meta else None
+        if token is None:
+            return None
+
+        async def report(completed: int, total: int, model_name: str) -> None:
+            await ctx.session.send_progress_notification(
+                progress_token=token,
+                progress=float(completed),
+                total=float(total),
+                message=f"{model_name} finished ({completed}/{total} consultants)",
+                related_request_id=ctx.request_id,
+            )
+
+        return report
+
     async def _process_list_models(self) -> SuccessResponse:
         """Return the configured consultant roster with enabled flags."""
         all_models = self.model_manager.config.models
@@ -414,6 +501,7 @@ class AICouncilServer:
             agentic_override=agentic_override,
             scope_hint=scope_hint,
             mode=mode_arg,
+            progress_cb=self._make_progress_cb(),
         )
         parallel_duration = time.time() - parallel_start
 
@@ -445,13 +533,23 @@ class AICouncilServer:
 
         # Prepare result — v0.4.0: no synthesizer, return all perspectives
         total_duration = time.time() - start_time
+        built = [Perspective(**p) for p in perspectives]
+
+        # Roll the per-consultant telemetry up into the batch tally. Cost stays
+        # None unless at least one participating model was priced, so an
+        # unpriced roster reports "not measured" rather than a confident $0.00.
+        priced = [p.telemetry.cost_usd for p in built if p.telemetry.cost_usd is not None]
         result = SuccessResponse(
             data=SuccessData(
-                perspectives=[Perspective(**p) for p in perspectives],
+                perspectives=built,
                 consensus=ConsensusInfo(
                     models_queried=len(models),
                     models_succeeded=ok_count,
-                    models_failed=len(models) - ok_count
+                    models_failed=len(models) - ok_count,
+                    wall_clock_s=round(parallel_duration, 3),
+                    total_tokens_in=sum(p.telemetry.tokens_in for p in built),
+                    total_tokens_out=sum(p.telemetry.tokens_out for p in built),
+                    total_cost_usd=round(sum(priced), 6) if priced else None,
                 )
             )
         )
@@ -479,7 +577,11 @@ class AICouncilServer:
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={}
-                    )
+                    ),
+                    # Sent once at initialize; clients surface this as
+                    # always-in-context text. Without it the orchestrator may
+                    # only ever see the bare tool NAMES.
+                    instructions=SERVER_INSTRUCTIONS,
                 )
             )
 

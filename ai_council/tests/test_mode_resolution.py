@@ -30,7 +30,7 @@ def _synth(monkeypatch, tools_enabled: bool):
     mgr = ModelManager(config=cfg)
     calls = {}
 
-    async def fake_scribe(models, ctx, q):
+    async def fake_scribe(models, ctx, q, **kw):
         calls["path"] = "scribe"
         return [ConsultantResult("ok", True) for _ in models]
 

@@ -2,8 +2,8 @@ import asyncio
 import json
 import random
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from openai import AsyncOpenAI
 from .logger import AICouncilLogger
 from .config import AICouncilConfig, ModelConfig, Provider, load_config
@@ -25,6 +25,72 @@ class ConfigValidationError(Exception):
     pass
 
 
+# Awaited once per consultant as it finishes: (completed, total, model_name).
+# Optional everywhere — the council runs identically without a listener.
+ProgressCallback = Callable[[int, int, str], Awaitable[None]]
+
+
+@dataclass
+class ConsultantTelemetry:
+    """What one consultant spent, and what it looked at (v0.7.0).
+
+    A consult costs several API calls across several providers and tens of
+    seconds; without this the caller is billed blind and cannot tell a grounded
+    answer from a confident guess. Every field is measured, never estimated —
+    token counts come from the provider's own `usage` block, and `cost_usd`
+    stays None unless that model carries explicit pricing in config.
+    """
+    duration_s: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    api_calls: int = 0
+    cost_usd: Optional[float] = None
+    # Tool-loop fields stay at their defaults on the SCRIBE path, which has no
+    # loop at all. `tool_rounds_budget` is None when no budget applied.
+    tool_rounds_used: int = 0
+    tool_rounds_budget: Optional[int] = None
+    files_read: List[str] = field(default_factory=list)
+    paths_listed: List[str] = field(default_factory=list)
+    tool_calls: Dict[str, int] = field(default_factory=dict)
+
+    def add_usage(self, response: Any) -> None:
+        """Accumulate one completion's token usage, if the provider reported any.
+
+        Every branch of the tool loop routes through here, so a consultant that
+        burned four completions on retries and forced-final nudges reports all
+        four. Providers that omit `usage` simply contribute nothing.
+        """
+        self.api_calls += 1
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self.tokens_in += int(getattr(usage, "prompt_tokens", 0) or 0)
+        self.tokens_out += int(getattr(usage, "completion_tokens", 0) or 0)
+
+    def price(self, model_config: ModelConfig) -> None:
+        """Set `cost_usd` from the model's configured rates, if it has any.
+
+        Left as None when neither rate is configured: a local Ollama model
+        genuinely has no dollar cost, and reporting 0.0 for an unpriced cloud
+        model would be a quiet lie rather than a missing value.
+        """
+        rate_in = model_config.input_cost_per_1m
+        rate_out = model_config.output_cost_per_1m
+        if rate_in is None and rate_out is None:
+            return
+        self.cost_usd = round(
+            self.tokens_in * (rate_in or 0.0) / 1_000_000
+            + self.tokens_out * (rate_out or 0.0) / 1_000_000,
+            6,
+        )
+
+    def absorb_activity(self, activity: Dict[str, Any]) -> None:
+        """Merge a ToolRegistry activity snapshot into this telemetry."""
+        self.files_read = list(activity.get("files_read", []))
+        self.paths_listed = list(activity.get("paths_listed", []))
+        self.tool_calls = dict(activity.get("tool_calls", {}))
+
+
 @dataclass
 class ConsultantResult:
     """Outcome of a single consultant call.
@@ -35,6 +101,7 @@ class ConsultantResult:
     """
     text: str
     ok: bool
+    telemetry: ConsultantTelemetry = field(default_factory=ConsultantTelemetry)
 
 
 def _extract_text(msg) -> str:
@@ -328,6 +395,7 @@ class ModelManager:
         model produces no usable content even after a retry nudge.
         """
         start_time = time.time()
+        tel = ConsultantTelemetry()
         self.logger.debug(f"Calling {model_config.name}...", {
             "model": model_config.name,
             "code_name": model_config.code_name
@@ -338,7 +406,10 @@ class ModelManager:
             if not question or not question.strip():
                 raise ValueError("Question cannot be empty")
 
-            prompt = f"Context: {context}\n\nQuestion: {question}\n\nPlease provide a detailed, well-reasoned answer."
+            # `context` is optional (v0.7.0). Omit the header entirely when it is
+            # blank rather than emitting a dangling "Context:" with nothing under it.
+            context_block = f"Context: {context.strip()}\n\n" if context and context.strip() else ""
+            prompt = f"{context_block}Question: {question}\n\nPlease provide a detailed, well-reasoned answer."
 
             # Choose the appropriate client
             client = self._get_client_for_model(model_config)
@@ -353,6 +424,7 @@ class ModelManager:
                     temperature=0.7,
                     max_tokens=8000,
                 )
+                tel.add_usage(response)
 
                 content = _extract_text(response.choices[0].message)
                 if not content:
@@ -374,6 +446,7 @@ class ModelManager:
                         temperature=0.7,
                         max_tokens=8000,
                     )
+                    tel.add_usage(retry)
                     content = _extract_text(retry.choices[0].message)
                     if not content:
                         raise ValueError("Empty response received from model")
@@ -397,7 +470,9 @@ class ModelManager:
                 "response_preview": content[:200] + "..." if len(content) > 200 else content
             })
             
-            return ConsultantResult(text=content, ok=True)
+            tel.duration_s = round(duration, 3)
+            tel.price(model_config)
+            return ConsultantResult(text=content, ok=True, telemetry=tel)
 
         except Exception as e:
             duration = time.time() - start_time
@@ -407,7 +482,11 @@ class ModelManager:
                 "error": str(e),
                 "duration": duration
             })
-            return ConsultantResult(text=error_msg, ok=False)
+            # A failed consultant still burned tokens and wall-clock; report
+            # them rather than silently zeroing the cost of the attempt.
+            tel.duration_s = round(duration, 3)
+            tel.price(model_config)
+            return ConsultantResult(text=error_msg, ok=False, telemetry=tel)
 
     async def call_model_with_tools(
         self,
@@ -440,6 +519,7 @@ class ModelManager:
             when the model never produces usable text (even after nudges).
         """
         start_time = time.time()
+        tel = ConsultantTelemetry(tool_rounds_budget=max_iterations)
         client = self._get_client_for_model(model_config)
         effective_timeout = timeout or self.config.parallel_timeout
 
@@ -454,6 +534,24 @@ class ModelManager:
         tools_arg = tool_schemas or None
 
         iterations = 0
+
+        def _finish(result: ConsultantResult) -> ConsultantResult:
+            """Stamp the accumulated telemetry onto whatever the loop produced.
+
+            Every exit — clean answer, timeout, exception — routes through here,
+            so a consultant that timed out still reports the tokens and rounds it
+            burned before the deadline. That is exactly the case where the caller
+            most needs to know what it paid for.
+            """
+            tel.duration_s = round(time.time() - start_time, 3)
+            tel.tool_rounds_used = iterations
+            tel.price(model_config)
+            activity = getattr(tool_dispatcher, "activity", None)
+            if isinstance(activity, dict):
+                tel.absorb_activity(activity)
+            result.telemetry = tel
+            return result
+
         try:
             async def _loop() -> ConsultantResult:
                 nonlocal iterations
@@ -465,6 +563,7 @@ class ModelManager:
                         temperature=0.4,
                         max_tokens=16000,
                     )
+                    tel.add_usage(response)
                     choice = response.choices[0]
                     msg = choice.message
                     tool_calls = getattr(msg, "tool_calls", None)
@@ -491,6 +590,7 @@ class ModelManager:
                             temperature=0.4,
                             max_tokens=16000,
                         )
+                        tel.add_usage(retry)
                         text = _extract_text(retry.choices[0].message)
                         if text:
                             return ConsultantResult(text=text, ok=True)
@@ -531,6 +631,7 @@ class ModelManager:
                             temperature=0.4,
                             max_tokens=16000,
                         )
+                        tel.add_usage(final)
                         text = _extract_text(final.choices[0].message)
                         if text:
                             return ConsultantResult(text=text, ok=True)
@@ -547,6 +648,7 @@ class ModelManager:
                             max_tokens=16000,
                             tools=None,
                         )
+                        tel.add_usage(final2)
                         text = _extract_text(final2.choices[0].message)
                         if text:
                             return ConsultantResult(text=text, ok=True)
@@ -577,27 +679,31 @@ class ModelManager:
                             "content": str(result),
                         })
 
-            return await asyncio.wait_for(_loop(), timeout=effective_timeout)
+            result = await asyncio.wait_for(_loop(), timeout=effective_timeout)
+            return _finish(result)
         except asyncio.TimeoutError:
             self.logger.error(
                 f"Synthesizer tool loop timed out after {effective_timeout}s "
                 f"({iterations} iterations)"
             )
-            return ConsultantResult(
+            return _finish(ConsultantResult(
                 text="Synthesis timed out during agentic tool loop.", ok=False
-            )
+            ))
         except Exception as e:
             duration = time.time() - start_time
             self.logger.error(
                 f"Synthesizer tool loop failed after {duration:.2f}s: {e}"
             )
-            return ConsultantResult(text=f"Error during agentic synthesis: {e}", ok=False)
+            return _finish(
+                ConsultantResult(text=f"Error during agentic synthesis: {e}", ok=False)
+            )
     
     async def _gather_consultants(
         self,
         coros: List[Any],
         models: List[ModelConfig],
         timeout: int,
+        progress_cb: Optional[ProgressCallback] = None,
     ) -> List[ConsultantResult]:
         """Run consultant coroutines concurrently, preserving completed work.
 
@@ -607,8 +713,34 @@ class ModelManager:
         reported as timed out. ``wait_for`` cancels the entire batch, which
         turned one slow consultant into a total (ALL_MODELS_FAILED) failure.
 
+        ``progress_cb``, when given, is awaited once per consultant as it
+        finishes — the batch otherwise runs silently for tens of seconds, which
+        reads as a hang to both the user and the calling agent.
+
         Returns one ConsultantResult per model, in the original order.
         """
+        completed = 0
+        total = len(coros)
+
+        async def _tracked(coro, name: str):
+            """Await one consultant, then report it done.
+
+            The report is deliberately inside the same task rather than a
+            done-callback: it must not fire for a consultant cancelled at the
+            deadline, and it must never let a broken client notification take
+            down an otherwise successful consultant.
+            """
+            nonlocal completed
+            result = await coro
+            completed += 1
+            if progress_cb is not None:
+                try:
+                    await progress_cb(completed, total, name)
+                except Exception as e:
+                    self.logger.warning(f"Progress notification failed: {e}")
+            return result
+
+        coros = [_tracked(c, models[i].name) for i, c in enumerate(coros)]
         tasks = [asyncio.ensure_future(c) for c in coros]
         done, pending = await asyncio.wait(tasks, timeout=timeout)
         for task in pending:
@@ -640,7 +772,8 @@ class ModelManager:
         self,
         models: List[ModelConfig],
         context: str,
-        question: str
+        question: str,
+        progress_cb: Optional[ProgressCallback] = None,
     ) -> List[ConsultantResult]:
         """Call multiple models in parallel, keeping whatever completed.
 
@@ -660,7 +793,9 @@ class ModelManager:
                 return await self.call_model(model, context, question)
 
         coros = [_run_one(model) for model in models]
-        return await self._gather_consultants(coros, models, self.config.parallel_timeout)
+        return await self._gather_consultants(
+            coros, models, self.config.parallel_timeout, progress_cb=progress_cb
+        )
 
     async def call_models_parallel_agentic(
         self,
@@ -672,6 +807,7 @@ class ModelManager:
         max_iterations: int = 8,
         scope_hint: Optional[str] = None,
         mode_guidance: Optional[str] = None,
+        progress_cb: Optional[ProgressCallback] = None,
     ) -> List[ConsultantResult]:
         """Run a tool-calling loop for every consultant, concurrency-capped.
 
@@ -710,8 +846,10 @@ class ModelManager:
         consultant_system_prompt = build_consultant_system_prompt(
             max_iterations, scope_hint, mode_guidance
         )
+        # See call_model: a blank `context` contributes no header at all.
+        context_block = f"Context:\n{context.strip()}\n\n" if context and context.strip() else ""
         user_prompt = (
-            f"Context:\n{context}\n\n"
+            f"{context_block}"
             f"Question:\n{question}\n\n"
             "Investigate the codebase as needed (within your tool budget and "
             "scope), then give your complete independent analysis."
@@ -738,4 +876,6 @@ class ModelManager:
         ]
         # Keep whatever finished: a single slow consultant no longer cancels
         # the batch and collapses a partial success into ALL_MODELS_FAILED.
-        return await self._gather_consultants(coros, models, timeout) 
+        return await self._gather_consultants(
+            coros, models, timeout, progress_cb=progress_cb
+        ) 

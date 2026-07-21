@@ -87,6 +87,18 @@ class ModelConfig(BaseModel):
     api_key: Optional[str] = Field(default=None, description="API key for this specific model (overrides global keys)")
     code_name: Optional[str] = Field(default=None, description="Anonymous code name for bias reduction (auto-assigned if not provided)")
     enabled: bool = Field(default=True, description="Whether this model is enabled")
+    # Optional pricing, used only to turn the token counts already returned by
+    # the provider into a dollar figure in each perspective's telemetry. Leave
+    # unset for local/free endpoints — `cost_usd` is then reported as null
+    # rather than a misleading 0.
+    input_cost_per_1m: Optional[float] = Field(
+        default=None, ge=0,
+        description="USD per 1M input tokens. Optional; omit for local or free endpoints.",
+    )
+    output_cost_per_1m: Optional[float] = Field(
+        default=None, ge=0,
+        description="USD per 1M output tokens. Optional; omit for local or free endpoints.",
+    )
 
     @field_validator("api_key", "base_url")
     @classmethod
