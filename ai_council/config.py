@@ -357,7 +357,21 @@ def _load_dotenv_files(config_file: Optional[str]) -> None:
                 continue
             key, _, value = line.partition("=")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = value.strip()
+            if value[:1] in ("\"", "'"):
+                # Quoted value: keep what's between the opening quote and its
+                # matching close; ignore anything after (e.g. a trailing
+                # comment). A '#' inside the quotes stays literal.
+                quote = value[0]
+                close = value.find(quote, 1)
+                value = value[1:close] if close != -1 else value[1:]
+            else:
+                # Unquoted value: an inline " #" starts a comment, matching how
+                # common dotenv parsers behave. Without this, `KEY=v # note`
+                # loads the value as "v # note" and is sent to the provider.
+                hash_idx = value.find(" #")
+                if hash_idx != -1:
+                    value = value[:hash_idx].rstrip()
             if key and key not in os.environ:
                 os.environ[key] = value
 

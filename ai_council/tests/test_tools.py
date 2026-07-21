@@ -124,6 +124,49 @@ def test_relative_path_resolved_against_root(registry: ToolRegistry):
     assert "def add" in out
 
 
+def test_glob_search_does_not_escape_sandbox(registry: ToolRegistry):
+    """glob_search must not enumerate paths outside workspace_root (B1).
+
+    fixtures/sample_repo has a parent (fixtures/) with sibling entries; a
+    '../*' pattern would leak their names before the boundary check was added.
+    """
+    out = registry.glob_search("../*")
+    # No returned line may point above the root. At most the root itself (".")
+    # survives — a sibling of sample_repo must never appear.
+    assert ".." not in out
+    for line in out.splitlines():
+        assert line in (".", "") or not line.startswith(".."), f"leaked: {line}"
+
+
+def test_glob_search_parent_recursive_blocked(registry: ToolRegistry):
+    out = registry.glob_search("../**/*.py")
+    # Any match must be inside the root; escaping matches are dropped.
+    for line in out.splitlines():
+        assert not line.startswith(".."), f"leaked outside path: {line}"
+
+
+def test_read_file_max_bytes_not_overridable(registry: ToolRegistry):
+    """The read cap is fixed; a model cannot raise it via tool args (B4)."""
+    out = registry.call("read_file", {"path": "src/math.py", "max_bytes": 10_000_000})
+    assert "bad arguments" in out.lower()
+
+
+def test_read_file_truncation_marker_bytes(tmp_path: Path):
+    """Truncation is decided by byte length, not decoded char count (B3)."""
+    reg = ToolRegistry(workspace_root=str(tmp_path), allowed_tools=None)
+    cap = ToolRegistry.MAX_READ_BYTES
+
+    # Exactly at the cap, ASCII, NOT truncated -> no marker (was a false marker).
+    (tmp_path / "exact.txt").write_bytes(b"a" * cap)
+    assert "[truncated" not in reg.read_file("exact.txt")
+
+    # Over the cap in bytes but fewer chars (2-byte UTF-8) -> marker present
+    # (was silently truncated with no warning).
+    (tmp_path / "multi.txt").write_bytes(("é" * cap).encode("utf-8"))  # 2*cap bytes
+    out = reg.read_file("multi.txt")
+    assert "[truncated" in out
+
+
 def test_symlink_escape_blocked(tmp_path: Path, registry: ToolRegistry):
     """A symlink inside the sandbox pointing outside must be rejected."""
     outside = tmp_path / "outside.txt"

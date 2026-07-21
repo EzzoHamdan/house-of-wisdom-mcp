@@ -1,8 +1,9 @@
 """
 AI Council MCP Server
 
-An MCP server that consults multiple AI models in parallel and synthesizes 
-their responses into comprehensive answers.
+An MCP server that consults multiple AI model families in parallel and returns
+each one's complete, independent analysis. There is no synthesizer — the
+orchestrator (the MCP client) weighs the perspectives itself.
 """
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version

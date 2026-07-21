@@ -193,6 +193,24 @@ def test_dotenv_loaded_next_to_config(tmp_path, monkeypatch):
     assert os.environ["AI_COUNCIL_OPENAI_API_KEY"] == "sk-from-dotenv"
 
 
+def test_dotenv_strips_inline_comment(tmp_path, monkeypatch):
+    """An unquoted inline comment is not part of the value (B6)."""
+    monkeypatch.delenv("AI_COUNCIL_OPENAI_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("AI_COUNCIL_OPENAI_API_KEY=sk-abc # production key\n")
+    _load_dotenv_files(str(tmp_path / "config.yaml"))
+    import os
+    assert os.environ["AI_COUNCIL_OPENAI_API_KEY"] == "sk-abc"
+
+
+def test_dotenv_hash_inside_quotes_is_kept(tmp_path, monkeypatch):
+    """A '#' inside a quoted value is literal, not a comment (B6)."""
+    monkeypatch.delenv("AI_COUNCIL_OPENAI_API_KEY", raising=False)
+    (tmp_path / ".env").write_text('AI_COUNCIL_OPENAI_API_KEY="sk-a#b" # note\n')
+    _load_dotenv_files(str(tmp_path / "config.yaml"))
+    import os
+    assert os.environ["AI_COUNCIL_OPENAI_API_KEY"] == "sk-a#b"
+
+
 def test_dotenv_does_not_override_real_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_COUNCIL_OPENAI_API_KEY", "sk-from-real-env")
     (tmp_path / ".env").write_text("AI_COUNCIL_OPENAI_API_KEY=sk-from-dotenv\n")

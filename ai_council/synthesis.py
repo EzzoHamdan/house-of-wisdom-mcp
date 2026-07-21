@@ -145,10 +145,13 @@ class ResponseSynthesizer:
         })
 
         if agentic:
-            # Append the mode-specific guidance to the scope_hint so the
-            # consultant system prompt in models.py picks it up.
-            mode_suffix = MODE_PROMPT_SUFFIX.get(mode, "")
-            effective_scope = (scope_hint or "") + mode_suffix
+            # Mode guidance is kept SEPARATE from the scope cage. Folding the
+            # SCHOLAR suffix ("scope is a starting point, not a cage") into
+            # scope_hint made models.py wrap it in a strict "SCOPE (strict): …
+            # Do NOT read outside it" block — a direct self-contradiction that
+            # fired on every scholar run. scope_hint now carries ONLY the
+            # caller's real scope; mode_guidance is appended outside the cage.
+            mode_guidance = MODE_PROMPT_SUFFIX.get(mode, "")
             try:
                 schemas = filter_schemas(tools_cfg.allowed_tools)
                 registries = [
@@ -164,7 +167,8 @@ class ResponseSynthesizer:
                     tool_schemas=schemas,
                     tool_registries=registries,
                     max_iterations=max_iter,
-                    scope_hint=effective_scope or None,
+                    scope_hint=scope_hint or None,
+                    mode_guidance=mode_guidance or None,
                 )
             except Exception as e:
                 self.logger.error(

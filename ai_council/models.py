@@ -47,6 +47,59 @@ def _extract_text(msg) -> str:
     return ""
 
 
+def build_consultant_system_prompt(
+    max_iterations: int,
+    scope_hint: Optional[str] = None,
+    mode_guidance: Optional[str] = None,
+) -> str:
+    """Assemble the consultant system prompt for the agentic tool loop.
+
+    The caller's `scope_hint` (if any) becomes a STRICT cage: "stay within this
+    scope, do not read outside it". `mode_guidance` (the per-mode suffix, e.g.
+    SCHOLAR's "scope is a starting point, not a cage") is appended OUTSIDE that
+    cage. Keeping them separate is the fix for the SCHOLAR self-contradiction:
+    folding the mode suffix into scope_hint made it get relabeled "SCOPE
+    (strict)" and immediately negated by "Do NOT read outside it".
+    """
+    scope_block = ""
+    if scope_hint and scope_hint.strip():
+        scope_block = (
+            "\n\nSCOPE (strict):\n"
+            f"{scope_hint.strip()}\n"
+            "Stay within this scope. Do NOT read, list, or glob paths "
+            "outside it unless the scope explicitly allows it.\n"
+        )
+
+    mode_block = ""
+    if mode_guidance and mode_guidance.strip():
+        mode_block = f"\n{mode_guidance.strip()}\n"
+
+    return (
+        "You are an independent consultant in an AI council investigating a "
+        "question about a codebase that is available to you via tools.\n\n"
+        "Your job: investigate the codebase, then produce your OWN complete, "
+        "self-contained analysis of the question. There is no synthesizer — "
+        "your output IS the final product the orchestrator will read.\n\n"
+        f"TOOL BUDGET (strict): You have AT MOST {max_iterations} tool calls "
+        f"total. Use them sparingly. Each read_file / list_dir / glob_search "
+        f"costs one call. think() also costs one call. If you exhaust the "
+        f"budget, you will be forced to answer from whatever you have so far. "
+        f"Plan before you read: decide which files matter, read ONLY those, "
+        f"then answer. Do NOT read files speculatively.\n\n"
+        "TOOL RULES:\n"
+        "- Use read_file / list_dir / glob_search to ground your analysis in "
+        "the ACTUAL code and docs. Do not make claims you cannot verify.\n"
+        "- Use think() to structure your reasoning before the final answer.\n"
+        "- When done investigating, emit your final analysis as plain text "
+        "with NO tool_calls.\n"
+        f"{scope_block}"
+        f"{mode_block}\n"
+        "Structure your final answer: (1) what you verified in the code, "
+        "(2) your findings, (3) your recommendation or verdict, (4) any "
+        "caveats or things you could not verify."
+    )
+
+
 class ModelManager:
     """Manages model configurations and API calls."""
     
@@ -87,9 +140,11 @@ class ModelManager:
             # prefer to use model-specific API key if provided
             api_key = model_config.api_key
         elif model_config.provider == Provider.CUSTOM:
-            api_key = model_config.api_key
-            if not api_key:
-                raise ValueError(f"API key required for model {model_config.name} using custom endpoint.") 
+            # A custom endpoint has no provider-level key to fall back on, so a
+            # missing per-model key is fatal. (The `if model_config.api_key`
+            # above already handled the present-key case; reaching here means
+            # it's absent.) Startup validation normally catches this first.
+            raise ValueError(f"API key required for model {model_config.name} using custom endpoint.")
         elif model_config.provider == Provider.OPENAI:
             api_key = self.config.openai_api_key
             if not api_key:
@@ -306,6 +361,11 @@ class ModelManager:
             {"role": "user", "content": user_prompt},
         ]
 
+        # An empty schema list (e.g. from allowed_tools: []) must be sent as an
+        # OMITTED tools param, not `tools: []` — strict endpoints reject an empty
+        # array and every consultant call fails. None makes the SDK drop the key.
+        tools_arg = tool_schemas or None
+
         iterations = 0
         try:
             async def _loop() -> ConsultantResult:
@@ -314,7 +374,7 @@ class ModelManager:
                     response = await self._create_completion(
                         client, model_config,
                         messages=messages,
-                        tools=tool_schemas,
+                        tools=tools_arg,
                         temperature=0.4,
                         max_tokens=16000,
                     )
@@ -364,6 +424,19 @@ class ModelManager:
                             "information gathered so far. Emit it as plain text."
                         )
                         messages.append(msg.model_dump(exclude_none=True))
+                        # The assistant message still carries unanswered
+                        # tool_calls. The OpenAI tool-calling contract requires a
+                        # tool response for EACH tool_call_id; strict endpoints
+                        # 400 ("must be followed by tool messages…") without
+                        # them, which broke the entire budget-exhaustion recovery
+                        # path on non-Ollama providers. Answer each pending call
+                        # with a stub so the forced-final turn is a valid history.
+                        for tc in tool_calls:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": "[tool budget exhausted — call not executed]",
+                            })
                         messages.append({"role": "user", "content": force_prompt})
                         final = await self._create_completion(
                             client, model_config,
@@ -498,6 +571,7 @@ class ModelManager:
         tool_registries: List[Any],
         max_iterations: int = 8,
         scope_hint: Optional[str] = None,
+        mode_guidance: Optional[str] = None,
     ) -> List[ConsultantResult]:
         """Run a tool-calling loop for every consultant, concurrency-capped.
 
@@ -508,10 +582,14 @@ class ModelManager:
         us within Ollama Cloud plan limits (Pro = 3, Max = 10, etc.).
 
         Args:
-            scope_hint: optional natural-language scope restriction passed
-                into the system prompt (e.g. "Only read these files: A, B.
-                Do not wander to other files."). When None, no scope is
-                enforced beyond the workspace sandbox.
+            scope_hint: optional natural-language scope restriction from the
+                CALLER (e.g. "Only read these files: A, B. Do not wander to
+                other files."). It is wrapped in a strict "stay within scope"
+                cage. When None, no scope is enforced beyond the sandbox.
+            mode_guidance: optional per-mode prompt suffix (e.g. the SCHOLAR
+                "scope is a starting point, not a cage" text). Appended OUTSIDE
+                the strict scope cage so it does not get relabeled as a strict
+                restriction and contradict itself.
 
         Returns:
             One final-analysis string per model, same order as `models`.
@@ -529,37 +607,8 @@ class ModelManager:
             f"max_concurrent={max_concurrent}, max_iter={max_iterations}"
         )
 
-        scope_block = ""
-        if scope_hint and scope_hint.strip():
-            scope_block = (
-                "\n\nSCOPE (strict):\n"
-                f"{scope_hint.strip()}\n"
-                "Stay within this scope. Do NOT read, list, or glob paths "
-                "outside it unless the scope explicitly allows it.\n"
-            )
-
-        consultant_system_prompt = (
-            "You are an independent consultant in an AI council investigating a "
-            "question about a codebase that is available to you via tools.\n\n"
-            "Your job: investigate the codebase, then produce your OWN complete, "
-            "self-contained analysis of the question. There is no synthesizer — "
-            "your output IS the final product the orchestrator will read.\n\n"
-            f"TOOL BUDGET (strict): You have AT MOST {max_iterations} tool calls "
-            f"total. Use them sparingly. Each read_file / list_dir / glob_search "
-            f"costs one call. think() also costs one call. If you exhaust the "
-            f"budget, you will be forced to answer from whatever you have so far. "
-            f"Plan before you read: decide which files matter, read ONLY those, "
-            f"then answer. Do NOT read files speculatively.\n\n"
-            "TOOL RULES:\n"
-            "- Use read_file / list_dir / glob_search to ground your analysis in "
-            "the ACTUAL code and docs. Do not make claims you cannot verify.\n"
-            "- Use think() to structure your reasoning before the final answer.\n"
-            "- When done investigating, emit your final analysis as plain text "
-            "with NO tool_calls.\n"
-            f"{scope_block}\n"
-            "Structure your final answer: (1) what you verified in the code, "
-            "(2) your findings, (3) your recommendation or verdict, (4) any "
-            "caveats or things you could not verify."
+        consultant_system_prompt = build_consultant_system_prompt(
+            max_iterations, scope_hint, mode_guidance
         )
         user_prompt = (
             f"Context:\n{context}\n\n"

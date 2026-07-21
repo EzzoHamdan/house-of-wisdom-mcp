@@ -59,20 +59,29 @@ class ToolRegistry:
             )
         return resolved
 
-    def read_file(self, path: str, max_bytes: int = 200_000) -> str:
-        """Read a UTF-8 text file, capped at max_bytes."""
+    # Hard cap on a single file read. Not overridable by the caller: read_file
+    # takes no max_bytes argument, so a model cannot pull an arbitrarily large
+    # file into its context by passing a bigger cap through the tool dispatcher.
+    MAX_READ_BYTES = 200_000
+
+    def read_file(self, path: str) -> str:
+        """Read a UTF-8 text file, capped at MAX_READ_BYTES."""
         resolved = self._resolve(path)
         if not resolved.exists():
             return f"Error: file not found: {path}"
         if not resolved.is_file():
             return f"Error: not a file: {path}"
         try:
-            data = resolved.read_bytes()[:max_bytes]
-            text = data.decode("utf-8", errors="replace")
+            raw = resolved.read_bytes()
         except Exception as e:
             return f"Error reading {path}: {e}"
-        if len(text) >= max_bytes:
-            text += f"\n...[truncated at {max_bytes} bytes]"
+        # Decide truncation from the BYTE length before decoding — comparing the
+        # decoded character count against a byte cap mislabels multibyte files
+        # (missing marker) and exact-size ASCII files (spurious marker).
+        truncated = len(raw) > self.MAX_READ_BYTES
+        text = raw[: self.MAX_READ_BYTES].decode("utf-8", errors="replace")
+        if truncated:
+            text += f"\n...[truncated at {self.MAX_READ_BYTES} bytes]"
         return text
 
     def list_dir(self, path: str = ".") -> str:
@@ -104,8 +113,18 @@ class ToolRegistry:
         try:
             matches = []
             for p in self.workspace_root.glob(clean):
-                if p.is_file() or p.is_dir():
-                    matches.append(p.relative_to(self.workspace_root).as_posix())
+                if not (p.is_file() or p.is_dir()):
+                    continue
+                # Enforce the sandbox boundary on every match. Path.glob does
+                # NOT stop a '..' segment (or a symlink) from escaping the root,
+                # so resolve and re-check — otherwise glob_search leaks the names
+                # of files and directories OUTSIDE workspace_root even though
+                # read_file/list_dir would reject the same paths.
+                try:
+                    rel = p.resolve().relative_to(self.workspace_root)
+                except ValueError:
+                    continue
+                matches.append(rel.as_posix())
                 if len(matches) >= max_results:
                     break
         except Exception as e:
