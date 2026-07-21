@@ -1,11 +1,23 @@
 import asyncio
 import json
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 from .logger import AICouncilLogger
 from .config import AICouncilConfig, ModelConfig, Provider, load_config
+
+
+# Transient failures worth a retry: rate limits (429) and gateway/server errors
+# (5xx). Connection/timeout errors carry no status_code and are matched by type.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_RETRYABLE_EXC_NAMES = {
+    "APIConnectionError",
+    "APITimeoutError",
+    "APIConnectionTimeoutError",
+    "InternalServerError",
+}
 
 
 class ConfigValidationError(Exception):
@@ -200,21 +212,66 @@ class ModelManager:
         m = re.search(r"'([A-Za-z_]+)'\s+(?:is not supported|does not support)", str(error))
         return m.group(1) if m else None
 
+    # Transient-retry tuning. Attempts beyond the first, exponential base delay,
+    # per-attempt jitter, and a hard cap so a large Retry-After can't stall a
+    # consultant past its batch timeout. Class attributes so tests can lower them.
+    RETRY_MAX_ATTEMPTS = 2
+    RETRY_BASE_DELAY = 0.5
+    RETRY_JITTER = 0.5
+    RETRY_MAX_DELAY = 8.0
+
+    @staticmethod
+    def _retry_after_seconds(error: Exception) -> Optional[float]:
+        """Parse a numeric ``Retry-After`` header (seconds) if the error has one."""
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
+        if not headers:
+            return None
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        try:
+            return float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _transient_retry_delay(cls, error: Exception, attempt: int) -> Optional[float]:
+        """Seconds to wait before retrying a transient error, or None if not retryable.
+
+        ``attempt`` is 0-based (0 = the delay before the first retry). Honors a
+        server ``Retry-After`` when present, else exponential backoff + jitter,
+        capped at ``RETRY_MAX_DELAY``.
+        """
+        status = getattr(error, "status_code", None)
+        retryable = status in _RETRYABLE_STATUS or type(error).__name__ in _RETRYABLE_EXC_NAMES
+        if not retryable:
+            return None
+        retry_after = cls._retry_after_seconds(error)
+        if retry_after is not None:
+            return min(retry_after, cls.RETRY_MAX_DELAY)
+        backoff = cls.RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, cls.RETRY_JITTER)
+        return min(backoff, cls.RETRY_MAX_DELAY)
+
     async def _create_completion(self, client, model_config: ModelConfig, **kwargs):
-        """chat.completions.create with provider-aware params and strip-and-retry
-        for parameters a model rejects as unsupported.
+        """chat.completions.create with provider-aware params, strip-and-retry
+        for unsupported parameters, and bounded backoff on transient failures.
 
         - OpenAI's newer models renamed the output cap: `max_tokens` becomes
           `max_completion_tokens`. Custom (OpenAI-compatible / Ollama) and
           OpenRouter endpoints keep `max_tokens`, so only OpenAI is rewritten.
-        - If the model still rejects a parameter (e.g. reasoning models allow
-          only the default `temperature`), drop that param and retry. Up to
-          three strips before the error is allowed to propagate — enough to
-          shed a chain of rejected params without looping forever.
+        - If the model rejects a parameter (e.g. reasoning models allow only the
+          default `temperature`), drop that param and retry immediately. Up to
+          three strips before the error propagates.
+        - On a transient failure (429 / 5xx / connection / timeout), wait with
+          exponential backoff (honoring ``Retry-After``) and retry, up to
+          ``RETRY_MAX_ATTEMPTS`` times. Without this, a single rate-limit under
+          concurrency permanently drops an otherwise-healthy consultant. The
+          batch/consultant timeouts still bound total time, so a retry loop
+          can't outlive its window.
         """
         if "max_tokens" in kwargs and model_config.provider == Provider.OPENAI:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         strips = 0
+        retries = 0
         while True:
             try:
                 return await client.chat.completions.create(model=model_config.model_id, **kwargs)
@@ -227,6 +284,17 @@ class ModelManager:
                     )
                     kwargs.pop(param, None)
                     continue
+                if retries < self.RETRY_MAX_ATTEMPTS:
+                    delay = self._transient_retry_delay(error, retries)
+                    if delay is not None:
+                        retries += 1
+                        self.logger.warning(
+                            f"{model_config.name} transient error "
+                            f"({type(error).__name__}); retry {retries}/"
+                            f"{self.RETRY_MAX_ATTEMPTS} in {delay:.2f}s"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
                 raise
 
     async def call_model(
