@@ -19,8 +19,6 @@ max_models: 3                          # how many consultants fire per call (1..
 parallel_timeout: 240                   # server-side cap per call, in seconds
 log_level: "INFO"                       # DEBUG | INFO | WARNING | ERROR
 log_format: "text"                      # text (human) | json (one object per line)
-anonymous_perspectives: false           # true = label perspectives Alpha/Beta/Gamma
-                                        # false = label by real model name
 max_concurrent_consultants: 3           # semaphore cap on concurrent consultant
                                         # loops. Ollama Pro=3, Max=10. Bump when
                                         # you upgrade — no code changes needed.

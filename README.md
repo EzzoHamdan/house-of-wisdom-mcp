@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-21, `master`, package version `0.6.2`.
+> **Reflects code as of** — 2026-07-21, `master`, package version `0.6.3`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -155,7 +155,7 @@ entry; when a `consult` call names no subset, only the first `max_models` enable
 - Failed consultants are returned **in-band** with `status: "error"` and the error text sitting in
   `analysis`. The call as a whole still reports `"status": "success"` as long as at least one
   consultant succeeded.
-- `label` is `model_name` normally, or `code_name` when `anonymous_perspectives: true`.
+- `label` equals `model_name`. `code_name` (Alpha/Beta/…) is also always present as a short handle.
 - `consensus` counts nothing about agreement — despite the name, it is a dispatch tally, and
   `models_failed` is simply the number of `status: "error"` entries.
 
@@ -374,7 +374,6 @@ file as documentation of defaults.
 | `parallel_timeout` | `60` | `240` | 5–600 (seconds) |
 | `log_level` | `INFO` | `INFO` | `DEBUG` `INFO` `WARNING` `ERROR` `CRITICAL` |
 | `log_format` | `text` | `text` | `text` `json` |
-| `anonymous_perspectives` | `false` | `false` | boolean |
 | `max_concurrent_consultants` | `3` | `3` | 1–32 |
 | `openai_api_key` | unset | commented out | string |
 | `openrouter_api_key` | unset | commented out | string |
@@ -436,7 +435,7 @@ client construction).
 | `base_url` | for `custom` | OpenAI-compatible `/v1` endpoint. Not enforced when `api_key` is set — see the warning above. |
 | `api_key` | for `custom`, else optional | Overrides the provider-level key for this entry. |
 | `enabled` | no (default `true`) | `false` keeps the entry configured but dormant. |
-| `code_name` | no | Auto-assigned from `Alpha, Beta, Gamma, …` if omitted. Only surfaces when `anonymous_perspectives: true`. ⚠ Setting it by hand on some entries while running close to the 10-model cap can crash startup — see [Sharp edges](#sharp-edges). |
+| `code_name` | no | Auto-assigned from `Alpha, Beta, Gamma, …` if omitted. A short stable handle, always returned in the payload alongside `model_name`. ⚠ Setting it by hand on some entries while running close to the 10-model cap can crash startup — see [Sharp edges](#sharp-edges). |
 
 ### Consultant recipes
 
@@ -513,8 +512,8 @@ picked up — set the prefixed name, or pass the key via YAML or the CLI flags.
 
 All settings use the prefix and match case-insensitively:
 `AI_COUNCIL_OPENAI_API_KEY`, `AI_COUNCIL_OPENROUTER_API_KEY`, `AI_COUNCIL_MAX_MODELS`,
-`AI_COUNCIL_PARALLEL_TIMEOUT`, `AI_COUNCIL_LOG_LEVEL`, `AI_COUNCIL_MAX_CONCURRENT_CONSULTANTS`,
-`AI_COUNCIL_ANONYMOUS_PERSPECTIVES`.
+`AI_COUNCIL_PARALLEL_TIMEOUT`, `AI_COUNCIL_LOG_LEVEL`, `AI_COUNCIL_LOG_FORMAT`,
+`AI_COUNCIL_MAX_CONCURRENT_CONSULTANTS`.
 
 ### Keeping keys out of the YAML
 
@@ -625,12 +624,13 @@ The loop stops when the model replies with plain text instead of tool calls, or 
 spent — after which it gets one forced turn to answer from what it gathered, and a second nudge if
 that comes back empty.
 
-⚠ The budget counts **rounds**, not individual tool calls: one unit per assistant turn that
-contains tool calls, however many it contains. A model that requests four files in a single turn
-spends one unit, not four — and a `think` batched alongside them is free. The system prompt tells
-the model that each call costs one unit, so most models behave as if the stricter accounting were
-real, but a batching model can legitimately read far more of your workspace than the budget number
-suggests.
+The budget counts **rounds**, not individual tool calls: one unit per assistant turn that contains
+tool calls, however many it contains. A model that requests four files in a single turn spends one
+unit, not four — and a `think` batched alongside them is free. As of v0.6.3 the system prompt says
+this plainly ("you have at most N *rounds*; a round is one turn, batched calls cost one round"), so
+the prompt matches the accounting. A batching model can therefore legitimately read more of your
+workspace per round than a naive per-call reading of the number would suggest — the frugality
+guidance ("read only what matters, do not read speculatively") is what keeps reads bounded.
 
 ---
 
@@ -672,9 +672,17 @@ in code.
 | --- | --- |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
 | Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:194` |
-| `anonymous_perspectives` | Changes `label` only. `model_name` and `code_name` are always both present in the payload, so this hides nothing from the orchestrator. |
 | Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:274-277` |
-| Tool budget | Counts assistant turns containing tool calls, not individual calls. |
+
+> **Changed in v0.6.3.** `anonymous_perspectives` was **removed** — it only rewrote the display
+> `label` while the real `model_name` stayed in the payload, so it hid nothing from an AI
+> orchestrator (which reads every field). Model identity is intentional *signal* the caller may
+> weigh; `code_name` remains as a short handle. An old config that still sets the key is silently
+> ignored. Also: the consultant tool-budget prompt now states its accounting honestly (N *rounds*,
+> batched calls cost one round), a `log_format: text | json` option (and `--log-format`) adds
+> line-delimited JSON logs, and duplicate model `name` values are rejected at startup.
+
+<!-- -->
 
 > **Fixed in v0.6.2.** A full-source audit resolved a batch of defects: `glob_search` no longer
 > escapes the sandbox via `..` patterns; SCHOLAR mode's prompt no longer contradicts itself (mode

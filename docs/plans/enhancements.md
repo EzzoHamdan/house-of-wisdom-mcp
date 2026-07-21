@@ -17,9 +17,9 @@ Anchors point at the code an enhancement would touch.
 | [E2](#e2) | High | Med | ✅ **done** — real test coverage for the tool loop, mode resolution, and sandbox | `ai_council/tests/` |
 | [E3](#e3) | Med | Low | ✅ **done** — apply a concurrency cap in SCRIBE mode too | `models.py::call_models_parallel` |
 | [E4](#e4) | Med | Low | ✅ **done** — cache one `AsyncOpenAI` client per endpoint instead of rebuilding per call | `models.py::_get_client_for_model` |
-| [E5](#e5) | Med | Low | Split per-consultant vs whole-batch timeout | `models.py:302`, `_gather_consultants` |
-| [E6](#e6) | Med | Med | Make `anonymous_perspectives` actually redact `model_name` in the payload | `main.py::Perspective`, `synthesis.py:188-195` |
-| [E7](#e7) | Low | Low | Count individual tool calls, not rounds, against the budget (or restate) | `models.py:355-356` |
+| [E5](#e5) | Med | Low | ⏸️ **deferred** — split per-consultant vs whole-batch timeout | `models.py`, `_gather_consultants` |
+| [E6](#e6) | Med | Med | ✅ **done (option C)** — removed `anonymous_perspectives` as incoherent | `config.py`, `synthesis.py` |
+| [E7](#e7) | Low | Low | ✅ **done (option B)** — tool-budget prompt now states round-accounting honestly | `models.py::build_consultant_system_prompt` |
 | [E8](#e8) | Low | Low | ✅ **done** — drop the unused `models_run` return value | `synthesis.py::collect_perspectives`, `main.py` |
 | [E9](#e9) | Low | Low | ✅ **done** — logger is injectable, not a forced singleton | `logger.py::AICouncilLogger` |
 | [E10](#e10) | Low | Low | ✅ **done** — optional JSON log format for machine-readable MCP debugging | `logger.py`, `config.py`, `main.py` |
@@ -105,7 +105,10 @@ endpoint is shared across models, distinct endpoints stay separate.
 
 ---
 
-## E5 — separate per-consultant and batch timeouts {#e5}
+## E5 — separate per-consultant and batch timeouts {#e5} ⏸️ deferred
+
+**Status.** Deferred by owner decision — lowest value of the batch, only worth it given a concrete
+slow-straggler need. Left as-is for now.
 
 **Today.** `parallel_timeout` is applied twice with the same value: once per consultant inside
 `call_model_with_tools` (`models.py:302`, via `asyncio.wait_for`) and once to the whole batch in
@@ -121,36 +124,37 @@ long total batch — the current single value forces a trade-off.
 
 ---
 
-## E6 — make anonymity actually redact {#e6}
+## E6 — anonymity was incoherent; removed {#e6} ✅ done (option C)
 
-**Today.** With `anonymous_perspectives: true`, only `label` switches to the code name; the payload
-still carries both `model_name` and `code_name` for every perspective
-(`synthesis.py:188-195`, `main.py::Perspective`). The README flags this: "this hides nothing from
-the orchestrator."
+**Was.** `anonymous_perspectives: true` only switched the `label` to the code name; the payload
+still carried the real `model_name`, so an AI orchestrator (which reads every field) saw straight
+through it — the "bias reduction" was theater.
 
-**Change.** When anonymous, omit or null `model_name` in the returned `Perspective` (keep an
-internal mapping server-side if needed for logs).
+**Decision.** Resolved by *consulting the House of Wisdom server itself* — a 4-family panel (GLM,
+Kimi, DeepSeek-Pro, GPT) split 2 remove / 2 make-real, but was **unanimous** that (a) the current
+state was theater, (b) model identity is legitimate *signal* for an AI reader, and (c) real
+anonymity needs heavy machinery (per-request random aliases, style/ordering leak-scrubbing) not
+worth it here. Chose **removal** — the honest, proportionate outcome.
 
-**Why it matters.** The feature's stated purpose is bias reduction; leaving the real name in the
-payload defeats it for any orchestrator that reads the field. Either redact it or drop the feature
-and document that anonymity isn't offered.
+**Done.** Removed the `anonymous_perspectives` field and all label-switching logic; `label` is now
+always `model_name`. `code_name` stays as a short handle, always present in the payload. An old
+config still setting the key is silently ignored (`extra="ignore"`). If a true blinded-evaluation
+mode is ever wanted, it should be built deliberately (rename to `blinded`, randomize aliases,
+strip leaks) — not as a flag that half-hides.
 
-**Caveat.** Some callers may rely on `model_name` always being present — this is a payload-shape
-change; gate it behind the existing flag so default behavior is unchanged.
+**Verified by.** `tests/test_config.py::test_anonymous_perspectives_field_removed`.
 
 ---
 
-## E7 — budget counts rounds, not tool calls {#e7}
+## E7 — budget wording made honest {#e7} ✅ done (option B)
 
-**Today.** The budget increments once per assistant turn containing tool calls
-(`models.py:355-356`), so a model that requests four files in one turn spends one unit while the
-system prompt tells it each call costs one unit (`models.py:547-552`). Documented sharp edge.
+**Was.** The budget counts *rounds* (turns with tool calls), but the prompt told the model "each
+call costs one call" — so a batching model was misled about how much it could read.
 
-**Change.** Either count `len(tool_calls)` per round for true per-call accounting, or soften the
-prompt wording to "each *round* of tool calls costs one unit" so the prompt matches reality.
-
-**Why it matters.** A batching model can read far more of the workspace than the budget number
-implies. Low urgency (read-only sandbox), but the prompt currently misstates the mechanic.
+**Done.** The prompt now says it plainly: "AT MOST N **rounds**; a round is one turn, batched calls
+cost one round." No accounting change (Option B) — just honesty, so the prompt matches the
+mechanic. Frugality guidance ("read only what matters, don't read speculatively") still bounds
+reads. The now-resolved README "Tool budget" sharp-edge row was removed.
 
 ---
 
@@ -212,10 +216,11 @@ could share a `name` and make the per-call `models` selection (and the returned 
 ## Triage summary
 
 ```text
-done:      E1 retry · E2 tests · E3 scribe cap · E4 client cache · E8 dead return
-           E9 logger injection · E10 json logs · E11 dup-name check
-remaining: E5 timeouts · E6 anonymity · E7 budget wording  (decide behavior first)
+done:     E1 retry · E2 tests · E3 scribe cap · E4 client cache · E6 remove anonymity
+          E7 honest budget wording · E8 dead return · E9 logger injection
+          E10 json logs · E11 dup-name check
+deferred: E5 split timeout  (owner decision — revisit on a concrete need)
 ```
 
-Suite is **103 passing**. Only E5/E6/E7 remain — the "decide the behavior first" set, each a
-semantics choice worth confirming before implementing.
+Suite is **102 passing**. Every enhancement is resolved except E5, which is intentionally deferred.
+Released as **v0.6.3**.
