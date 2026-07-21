@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-21, `master`, package version `0.6.3`.
+> **Reflects code as of** — 2026-07-21, `master`, package version `0.7.0`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -33,9 +33,11 @@ endpoint.
 **There is no synthesizer.** The caller — your IDE agent — reads every perspective and decides.
 Treating any single perspective as ground truth defeats the design.
 
-**Do not fire the council on every prompt.** It costs several model calls and tens of seconds.
-Use it only when a *different model family* seeing the problem would plausibly change the outcome.
-For work that just needs your own focused reasoning, use a single-mind thinking tool instead.
+**When it earns its cost.** A call spends several model API calls and tens of seconds, so it pays
+off when a *different model family* seeing the problem would plausibly change the outcome: a
+contested design decision, a bug you have been circling without converging, a high-stakes or
+hard-to-reverse conclusion, or an explicit request for a second opinion. Work that just needs one
+mind's focused reasoning does not need a council.
 
 ---
 
@@ -102,6 +104,17 @@ are passed. `scholar` can only be reached by asking for it explicitly.
 > scripts registered before the rename keep functioning. Only the new names are advertised, so your
 > agent will discover and use `consult` / `list_models` going forward.
 
+### How your agent discovers them
+
+At `initialize` the server sends a block of **instructions** (`main.py::SERVER_INSTRUCTIONS`) that
+MCP clients surface as always-in-context text. This matters because many clients load tool
+*descriptions* lazily — behind a search, or not at all when the tool list is long — so an
+orchestrator may see nothing but the bare names `consult` and `list_models`, neither of which says
+what this server is. The instructions block is the only text guaranteed to arrive, so it stands on
+its own: what the server does, which tool to call, and the concrete situations worth calling it in.
+
+Keep it short if you edit it — it costs context on every turn of every conversation.
+
 ### `list_models`
 
 Takes no arguments. Returns the configured roster straight from loaded config.
@@ -129,8 +142,8 @@ entry; when a `consult` call names no subset, only the first `max_models` enable
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `context` | string | **yes** | Background. Must be non-empty, max **200,000** characters. In `scribe` mode this is the only material the models see, so paste file contents here. |
-| `question` | string | **yes** | Must be non-empty, max **10,000** characters. |
+| `question` | string | **yes** | The only required argument. Must be non-empty, max **10,000** characters. |
+| `context` | string | no | Background, max **200,000** characters. Optional since v0.7.0. In `scribe` mode this is the only material the models see, so paste file contents here; in `translator`/`scholar` a sentence or two is plenty, because consultants read files themselves. |
 | `mode` | string | no | `scribe` \| `translator` \| `scholar`. See [resolution order](#how-the-effective-mode-is-resolved). |
 | `workspace_root` | string | no | Absolute path used as the read-only sandbox root. Ignored in `scribe`. Falls back to `synthesizer_tools.workspace_root`, then to the **server process's current working directory** — which is set by your MCP client, not by you. Pass it explicitly. |
 | `scope_hint` | string | no | Free text injected into each consultant's system prompt, e.g. `"Start with main.py and config.py"`. Ignored in `scribe`. |
@@ -144,10 +157,30 @@ entry; when a `consult` call names no subset, only the first `max_models` enable
   "status": "success",
   "data": {
     "perspectives": [
-      {"label": "GLM",  "model_name": "GLM",  "code_name": "Alpha", "analysis": "...", "status": "ok",    "mode": "translator"},
-      {"label": "Kimi", "model_name": "Kimi", "code_name": "Beta",  "analysis": "...", "status": "error", "mode": "translator"}
+      {
+        "label": "GLM", "model_name": "GLM", "code_name": "Alpha",
+        "analysis": "...", "status": "ok", "mode": "translator",
+        "telemetry": {
+          "duration_s": 31.4, "tokens_in": 3000, "tokens_out": 220, "api_calls": 2,
+          "cost_usd": 0.002284, "tool_rounds_used": 1, "tool_rounds_budget": 4,
+          "files_read": ["src/math.py"], "paths_listed": [], "tool_calls": {"read_file": 1}
+        }
+      },
+      {
+        "label": "Kimi", "model_name": "Kimi", "code_name": "Beta",
+        "analysis": "...", "status": "ok", "mode": "translator",
+        "telemetry": {
+          "duration_s": 12.0, "tokens_in": 800, "tokens_out": 60, "api_calls": 1,
+          "cost_usd": null, "tool_rounds_used": 0, "tool_rounds_budget": 4,
+          "files_read": [], "paths_listed": [], "tool_calls": {}
+        }
+      }
     ],
-    "consensus": {"models_queried": 2, "models_succeeded": 1, "models_failed": 1}
+    "consensus": {
+      "models_queried": 2, "models_succeeded": 2, "models_failed": 0,
+      "wall_clock_s": 31.4, "total_tokens_in": 3800, "total_tokens_out": 280,
+      "total_cost_usd": 0.002284
+    }
   }
 }
 ```
@@ -158,6 +191,39 @@ entry; when a `consult` call names no subset, only the first `max_models` enable
 - `label` equals `model_name`. `code_name` (Alpha/Beta/…) is also always present as a short handle.
 - `consensus` counts nothing about agreement — despite the name, it is a dispatch tally, and
   `models_failed` is simply the number of `status: "error"` entries.
+- `wall_clock_s` is elapsed time, **not** the sum of the per-consultant durations: consultants run
+  in parallel, so summing them would report a number nobody actually waited.
+
+#### `telemetry` — what each perspective cost, and what it rests on
+
+Added in v0.7.0. It is measurement, never judgment: the server still merges, ranks, and votes on
+nothing. It just stops you from having to take each analysis on faith.
+
+| Field | Meaning |
+| --- | --- |
+| `files_read` | Files this consultant actually opened, in first-touch order, deduplicated. Only successful reads — a miss or a sandbox rejection is not evidence. |
+| `paths_listed` | Directories it listed. |
+| `tool_calls` | Per-tool call counts. Measures *effort*, so failed calls count here even though they contribute no `files_read`. |
+| `tool_rounds_used` / `tool_rounds_budget` | Rounds spent against the budget it was given. Equal values mean it was cut off, and its answer may be partial. |
+| `tokens_in` / `tokens_out` / `api_calls` | Summed across **every** completion, including retry nudges and forced-final turns. Taken from the provider's own `usage` block; providers that omit it contribute zero. |
+| `cost_usd` | Computed from the model's configured rates. `null` when unpriced. |
+| `duration_s` | Wall-clock for this one consultant, reported even when it errored or timed out — a failed call still cost you something. |
+
+Read `files_read` first. It is the difference between a perspective grounded in your codebase and
+one that merely sounds grounded, and it changes what disagreement means:
+
+```text
+GLM   read src/auth.py   → "the token refresh is racy"
+Kimi  read nothing       → "looks fine to me"
+```
+
+That is not a two-way split to be weighed evenly. In `scribe` mode every consultant reports empty
+`files_read` by design — the mode has no file access at all, so the field carries no signal there.
+
+**Progress notifications.** If your MCP client sends a `progressToken`, the server emits one
+notification per consultant as it finishes (`3/3 consultants`), so a 60-second `scholar` run stops
+looking like a hang. Clients that don't ask for progress get none, and the council behaves
+identically either way.
 
 **Error shape.**
 
@@ -167,7 +233,7 @@ entry; when a `consult` call names no subset, only the first `max_models` enable
 
 | `code` | Fires when |
 | --- | --- |
-| `INVALID_INPUT` | `context` or `question` is empty or over its character cap |
+| `INVALID_INPUT` | `question` is empty, or `question`/`context` is over its character cap |
 | `NO_MATCHING_MODELS` | A `models` array was passed and matched no enabled model |
 | `NOT_ENOUGH_MODELS_ENABLED` | The fireable roster is empty (startup validation normally prevents this) |
 | `ALL_MODELS_FAILED` | Every consultant errored or the whole batch timed out |
@@ -436,6 +502,12 @@ client construction).
 | `api_key` | for `custom`, else optional | Overrides the provider-level key for this entry. |
 | `enabled` | no (default `true`) | `false` keeps the entry configured but dormant. |
 | `code_name` | no | Auto-assigned from `Alpha, Beta, Gamma, …` if omitted. A short stable handle, always returned in the payload alongside `model_name`. ⚠ Setting it by hand on some entries while running close to the 10-model cap can crash startup — see [Sharp edges](#sharp-edges). |
+| `input_cost_per_1m` | no | USD per 1M input tokens. Purely for reporting: turns the provider's own token counts into `telemetry.cost_usd`. |
+| `output_cost_per_1m` | no | USD per 1M output tokens. Same. |
+
+Leave both pricing fields unset for local or free endpoints. `cost_usd` is then reported as `null`
+rather than `0.0` — "not priced" and "measured as free" are different claims, and only one of them
+is true for an unpriced cloud model.
 
 ### Consultant recipes
 
@@ -674,6 +746,32 @@ in code.
 | Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:194` |
 | Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:274-277` |
 
+> **Added in v0.7.0 — telemetry and progress.** Every perspective now carries a `telemetry` block:
+> which files that consultant actually read, how many tool rounds it spent against its budget, its
+> token counts and wall-clock, and `cost_usd` when the model has `input_cost_per_1m` /
+> `output_cost_per_1m` configured (unpriced models report `null`, never `0.0`). `consensus` gained
+> `wall_clock_s` and batch token/cost totals. None of this merges or ranks anything — it is the
+> evidence behind each answer, and `files_read` in particular distinguishes a grounded analysis from
+> a confident one. Separately, the server now emits an MCP progress notification per consultant when
+> the client sends a `progressToken`. `main.py`, `models.py`, `synthesis.py`, `tools.py`, `config.py`.
+
+<!-- -->
+
+> **Changed in v0.7.0 — discoverability.** The server was functionally correct long before it was
+> *reachable*: models rarely called it. Six causes were fixed. (1) The server now sends
+> `instructions` at `initialize`, so a client that lazily loads tool schemas still knows what this
+> server is — previously it sent none, and an orchestrator could see only the bare tool names.
+> (2) The `consult` description no longer opens by redirecting the caller to a different, possibly
+> uninstalled MCP server. (3) It now leads with concrete situations worth calling it in, instead of
+> leading with latency figures and "do NOT fire reflexively". (4) The `agentic` migration trivia
+> moved out of the description into the field schema where it belongs — the blurb went from ~2,300
+> to ~1,250 characters. (5) `context` is now **optional**; only `question` is required, so the
+> cheapest valid call is one argument. A blank `context` emits no header into the consultant
+> prompt. (6) The README's own "do not fire on every prompt" framing was rewritten to say when the
+> tool *earns* its cost. No behavioral change to dispatch, modes, or the sandbox.
+
+<!-- -->
+
 > **Changed in v0.6.3.** `anonymous_perspectives` was **removed** — it only rewrote the display
 > `label` while the real `model_name` stayed in the payload, so it hid nothing from an AI
 > orchestrator (which reads every field). Model identity is intentional *signal* the caller may
@@ -735,15 +833,16 @@ every tool call each consultant makes.
 
 | Concern | Source |
 | --- | --- |
-| MCP wiring, tool schemas, request validation, error shapes | [`ai_council/main.py`](ai_council/main.py) |
+| MCP wiring, server instructions, tool schemas, request validation, error shapes | [`ai_council/main.py`](ai_council/main.py) |
 | Mode enum, mode resolution, per-mode prompt suffixes, perspective assembly | [`ai_council/synthesis.py`](ai_council/synthesis.py) |
 | Client construction, parallel dispatch, the tool loop, concurrency semaphore | [`ai_council/models.py`](ai_council/models.py) |
 | Config schema, defaults, startup validation, YAML/env loading | [`ai_council/config.py`](ai_council/config.py) |
 | Sandbox, the four tools, path resolution, tool schemas | [`ai_council/tools.py`](ai_council/tools.py) |
 | Structured stderr logging | [`ai_council/logger.py`](ai_council/logger.py) |
 
-Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). They cover config
-parsing and sandbox path resolution; there is no test that exercises a live model call.
+Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 113 tests cover
+config parsing, sandbox path resolution, the tool loop, mode resolution, prompt assembly, transient
+retry, and the discoverability contract. All model I/O is stubbed — no test hits a live endpoint.
 
 ---
 

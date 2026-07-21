@@ -134,9 +134,19 @@ models:
   # The model_id is the slug shown there (e.g. anthropic/claude-opus-4).
   # provider=openrouter pulls the key from openrouter_api_key above (or env var
   # AI_COUNCIL_OPENROUTER_API_KEY).
+  #
+  # OPTIONAL PRICING. input_cost_per_1m / output_cost_per_1m are USD per 1M
+  # tokens. They do not affect routing or behavior at all — they only turn the
+  # token counts the provider already returns into a `cost_usd` figure in each
+  # perspective's telemetry, so you can see what a consult actually cost.
+  # Copy the current rates from the provider's pricing page. Omit both for
+  # local/free models: cost_usd is then reported as null rather than a
+  # misleading 0.0.
   - name: "Claude Opus"
     provider: "openrouter"
     model_id: "anthropic/claude-opus-4"
+    input_cost_per_1m: 15.0             # example rate — check current pricing
+    output_cost_per_1m: 75.0
     enabled: false
   - name: "Gemini Pro"
     provider: "openrouter"

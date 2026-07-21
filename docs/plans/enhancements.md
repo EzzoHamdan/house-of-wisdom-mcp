@@ -24,6 +24,9 @@ Anchors point at the code an enhancement would touch.
 | [E9](#e9) | Low | Low | ✅ **done** — logger is injectable, not a forced singleton | `logger.py::AICouncilLogger` |
 | [E10](#e10) | Low | Low | ✅ **done** — optional JSON log format for machine-readable MCP debugging | `logger.py`, `config.py`, `main.py` |
 | [E11](#e11) | Low | Low | ✅ **done** — reject duplicate model `name` values at startup | `config.py::model_post_init` |
+| [E12](#e12) | High | Med | ✅ **done** — report which files each consultant actually read | `tools.py::ToolRegistry`, `models.py::ConsultantTelemetry` |
+| [E13](#e13) | High | Low | ✅ **done** — token, latency and cost accounting per perspective | `models.py::ConsultantTelemetry`, `config.py::ModelConfig` |
+| [E14](#e14) | Med | Med | ✅ **done** — MCP progress notification per consultant | `main.py::_make_progress_cb`, `models.py::_gather_consultants` |
 
 ---
 
@@ -213,14 +216,80 @@ could share a `name` and make the per-call `models` selection (and the returned 
 
 ---
 
+## E12 — report which files each consultant actually read {#e12} ✅ done
+
+**Was.** A perspective was a wall of prose and nothing else. Two consultants disagreeing looked
+like a 50/50 split even when one had read the relevant file and the other had answered from the
+prompt alone. The server knew the difference — every tool call passed through `ToolRegistry` — and
+threw it away.
+
+**Done.** `ToolRegistry` now records its own activity: `files_read` (successful reads only, in
+first-touch order, deduplicated), `paths_listed`, and `call_counts` per tool. Misses and sandbox
+rejections are counted as *effort* in `call_counts` but never recorded as *evidence* in
+`files_read`. One registry is built per consultant, so the record is already per-perspective. The
+tool loop absorbs the snapshot via `ConsultantTelemetry.absorb_activity` and it ships in the
+payload.
+
+**Why this is not a synthesizer.** It merges, ranks and votes on nothing. It reports what happened.
+The orchestrator still does all the weighing — it just no longer has to take each analysis on faith.
+
+**Verified by.** `tests/test_telemetry.py` — reads recorded once, misses and sandbox violations
+excluded, an end-to-end loop proving `files_read` after a real `read_file`, and the inverse case
+where a consultant answers without opening anything.
+
+---
+
+## E13 — token, latency and cost accounting {#e13} ✅ done
+
+**Was.** `consensus` reported queried/succeeded/failed and nothing else. Every call spent several
+API calls across several providers and the caller was billed blind.
+
+**Done.** `ConsultantTelemetry` accumulates `tokens_in`, `tokens_out` and `api_calls` from the
+provider's own `usage` block at **every** completion — including the retry nudges and forced-final
+turns, which are billed but were previously invisible. `duration_s` is stamped at a single exit
+point (`_finish`) so timeouts and errors report what they burned too. Optional
+`input_cost_per_1m` / `output_cost_per_1m` on `ModelConfig` produce `cost_usd`; with neither set it
+stays `None`, because `0.0` would claim an unpriced cloud model was measured as free.
+`consensus` gained `wall_clock_s` (elapsed, not the sum of parallel durations) and batch totals.
+
+**Verified by.** `tests/test_telemetry.py` — accumulation across three completions, pricing math,
+`None` without rates, quiet degradation when a provider omits `usage`, and a failed consultant
+still reporting its spend.
+
+---
+
+## E14 — progress notification per consultant {#e14} ✅ done
+
+**Was.** A `scholar` run went silent for tens of seconds. To a user that reads as a hang; to a
+calling agent it is a reason not to call again.
+
+**Done.** `_gather_consultants` takes an optional `progress_cb` and awaits it as each consultant
+finishes. `main.py::_make_progress_cb` binds it to the live MCP request, but only when the client
+opted in with a `progressToken` — otherwise it returns `None` and nothing is emitted. The reporter
+fires inside the consultant's own task, so a consultant cancelled at the deadline never reports
+completion, and a callback that raises is logged and swallowed rather than losing an answer that
+already succeeded.
+
+**Verified by.** `tests/test_telemetry.py` — monotonic counts in completion order (not roster
+order) while results stay in roster order, no report from a timed-out consultant, a raising
+callback that cannot fail the consultant, and an **end-to-end test over a real in-memory MCP client
+session** that proves notifications actually cross the wire.
+
+---
+
 ## Triage summary
 
 ```text
 done:     E1 retry · E2 tests · E3 scribe cap · E4 client cache · E6 remove anonymity
           E7 honest budget wording · E8 dead return · E9 logger injection
           E10 json logs · E11 dup-name check
+          E12 files-read evidence · E13 cost/latency accounting · E14 progress notifications
 deferred: E5 split timeout  (owner decision — revisit on a concrete need)
 ```
 
-Suite is **102 passing**. Every enhancement is resolved except E5, which is intentionally deferred.
-Released as **v0.6.3**.
+Suite is **127 passing**. Every enhancement is resolved except E5, which is intentionally deferred.
+E1–E11 released as **v0.6.3**; E12–E14 land in **v0.7.0** alongside the discoverability work.
+
+> **Note on what changed between them.** E1–E11 made the server more correct. E12–E14 make it more
+> *usable by an agent* — the same theme as the v0.7.0 interface work: the code was mature well
+> before the interface was.
