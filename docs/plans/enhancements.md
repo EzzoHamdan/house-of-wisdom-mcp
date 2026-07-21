@@ -21,9 +21,9 @@ Anchors point at the code an enhancement would touch.
 | [E6](#e6) | Med | Med | Make `anonymous_perspectives` actually redact `model_name` in the payload | `main.py::Perspective`, `synthesis.py:188-195` |
 | [E7](#e7) | Low | Low | Count individual tool calls, not rounds, against the budget (or restate) | `models.py:355-356` |
 | [E8](#e8) | Low | Low | ✅ **done** — drop the unused `models_run` return value | `synthesis.py::collect_perspectives`, `main.py` |
-| [E9](#e9) | Low | Low | Inject the logger instead of a process-wide singleton | `logger.py::AICouncilLogger` |
-| [E10](#e10) | Low | Low | Optional JSON log format for machine-readable MCP debugging | `logger.py` |
-| [E11](#e11) | Low | Low | Reject duplicate model `name` values at startup | `config.py::model_post_init` |
+| [E9](#e9) | Low | Low | ✅ **done** — logger is injectable, not a forced singleton | `logger.py::AICouncilLogger` |
+| [E10](#e10) | Low | Low | ✅ **done** — optional JSON log format for machine-readable MCP debugging | `logger.py`, `config.py`, `main.py` |
+| [E11](#e11) | Low | Low | ✅ **done** — reject duplicate model `name` values at startup | `config.py::model_post_init` |
 
 ---
 
@@ -166,57 +166,56 @@ removed. Pure simplification — no behavior change.
 
 ---
 
-## E9 — inject the logger instead of a global singleton {#e9}
+## E9 — inject the logger instead of a global singleton {#e9} ✅ done
 
-**Today.** `AICouncilLogger` is a process-wide singleton (`logger.py:9-34`) whose `__init__` guard
-means the first construction wins and later config (log level, handlers) mutates shared state.
+**Was.** `AICouncilLogger` was a process-wide singleton (`__new__` + `_initialized` guard); the
+first construction won and no second independent instance could exist.
 
-**Change.** Allow an injected logger / factory; keep the singleton as the default for the CLI entry
-point.
+**Done.** The singleton machinery is gone. Each `AICouncilLogger()` is a distinct object, but they
+route through the same *named* stdlib logger and a single handler, so no duplicate handlers or
+double startup lines. Level and format stay process-wide (set by first construction or the last
+`set_level` / `set_format`).
 
-**Why it matters.** Makes tests (E2) isolatable and would let two configs coexist in one process
-(e.g. embedding the server). Low effort; unblocks cleaner tests.
-
----
-
-## E10 — optional JSON log format {#e10}
-
-**Today.** Logs are human-formatted text on stderr (`logger.py:27-31`); structured `data` is
-pretty-printed JSON appended after the message.
-
-**Change.** Add a `log_format: text | json` option emitting one JSON object per line when `json`.
-
-**Why it matters.** MCP clients collect stderr; line-delimited JSON is far easier to filter and
-correlate when debugging a multi-consultant run. Nice-to-have, not urgent.
+**Verified by.** `tests/test_logger.py` — two instances are distinct, the named logger keeps
+exactly one handler.
 
 ---
 
-## E11 — reject duplicate model names at startup {#e11}
+## E10 — optional JSON log format {#e10} ✅ done
 
-**Today.** `model_post_init` (`config.py`) validates unique `code_name` values but not `name`
-values. Two enabled models can share a `name`; the per-call `models` argument matches by `name`
-(`main.py::_process_ai_council`), so a duplicate makes the subset selection and the returned
-`label` ambiguous — both entries fire under one requested name, or neither is individually
-addressable.
+**Was.** Logs were human text only; structured `data` was pretty-printed and appended after the
+message.
 
-**Change.** Add a uniqueness check on `name` alongside the existing `code_name` check, failing
-startup with a clear message.
+**Done.** Added a `log_format: text | json` config key (and `--log-format` CLI flag). In `json`
+mode each record is one JSON object per line — `ts`, `level`, `logger`, `message`, and `data`
+(omitted when absent) — via a `_JsonFormatter`. `data` now rides the record as an attribute, so
+both formatters render it cleanly; text output is unchanged. Applied after config load in
+`ModelManager._apply_log_format`.
 
-**Why it matters.** Low frequency (you'd have to name two models the same), and it's a
-configuration mistake rather than a code defect — hence an enhancement, not a bug. Filed here so
-it isn't lost. Kept out of the fix batch because tightening validation could reject a config that
-"works" today for someone relying on first-match behavior.
+**Verified by.** `tests/test_logger.py` (formatter selection, valid JSON line, data omitted when
+None) and `tests/test_config.py` (`log_format` parsing/default).
+
+---
+
+## E11 — reject duplicate model names at startup {#e11} ✅ done
+
+**Was.** `model_post_init` validated unique `code_name` values but not `name` values, so two models
+could share a `name` and make the per-call `models` selection (and the returned label) ambiguous.
+
+**Done.** A `name`-uniqueness check now runs alongside the `code_name` check, raising
+`Duplicate model names found in model configuration` at startup.
+
+**Verified by.** `tests/test_config.py::test_duplicate_model_names_rejected`.
 
 ---
 
 ## Triage summary
 
 ```text
-done:                                E1 retry · E2 tests · E3 scribe cap · E4 client cache · E8 dead return
-deliberate changes (payload/config): E5 timeouts · E6 anonymity · E7 budget wording
-polish:                              E9 logger injection · E10 json logs · E11 dup-name check
+done:      E1 retry · E2 tests · E3 scribe cap · E4 client cache · E8 dead return
+           E9 logger injection · E10 json logs · E11 dup-name check
+remaining: E5 timeouts · E6 anonymity · E7 budget wording  (decide behavior first)
 ```
 
-Suite is **94 passing**. None of the remaining items are blockers; the ordering reflects
-value-to-effort, not necessity. E5/E6/E7 are the "decide the behavior first" set — worth a
-conversation before implementing.
+Suite is **103 passing**. Only E5/E6/E7 remain — the "decide the behavior first" set, each a
+semantics choice worth confirming before implementing.

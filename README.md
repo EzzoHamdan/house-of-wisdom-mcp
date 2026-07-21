@@ -373,6 +373,7 @@ file as documentation of defaults.
 | `max_models` | `3` | `3` | 1–10 |
 | `parallel_timeout` | `60` | `240` | 5–600 (seconds) |
 | `log_level` | `INFO` | `INFO` | `DEBUG` `INFO` `WARNING` `ERROR` `CRITICAL` |
+| `log_format` | `text` | `text` | `text` `json` |
 | `anonymous_perspectives` | `false` | `false` | boolean |
 | `max_concurrent_consultants` | `3` | `3` | 1–32 |
 | `openai_api_key` | unset | commented out | string |
@@ -412,6 +413,7 @@ so the strings below appear as a fragment of a longer message rather than on the
 | --- | --- |
 | At least **2** models must have `enabled: true` | `At least two models must be enabled` |
 | At most **10** models configured in total | `Cannot configure more than 10 models (found N)` |
+| `name` values must be unique | `Duplicate model names found in model configuration` |
 | `code_name` values must be unique | `Duplicate code names found in model configuration` |
 | Every `provider: custom` entry needs a `base_url` | `Custom endpoint '<name>' requires a base_url` |
 | Every `provider: custom` entry needs an `api_key` | `Custom endpoint '<name>' requires an api_key` |
@@ -712,6 +714,7 @@ in code.
 | `--max-models N` | Overrides `max_models`. |
 | `--parallel-timeout N` | Overrides `parallel_timeout`, in seconds. |
 | `--log-level LEVEL` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. (`CRITICAL` is valid in YAML but not accepted here.) |
+| `--log-format FMT` | `text` \| `json`. Overrides `log_format`. |
 | `--openai-api-key KEY` | Overrides the YAML value. |
 | `--openrouter-api-key KEY` | Overrides the YAML value. |
 
