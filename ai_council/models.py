@@ -92,12 +92,13 @@ def build_consultant_system_prompt(
         "Your job: investigate the codebase, then produce your OWN complete, "
         "self-contained analysis of the question. There is no synthesizer — "
         "your output IS the final product the orchestrator will read.\n\n"
-        f"TOOL BUDGET (strict): You have AT MOST {max_iterations} tool calls "
-        f"total. Use them sparingly. Each read_file / list_dir / glob_search "
-        f"costs one call. think() also costs one call. If you exhaust the "
-        f"budget, you will be forced to answer from whatever you have so far. "
-        f"Plan before you read: decide which files matter, read ONLY those, "
-        f"then answer. Do NOT read files speculatively.\n\n"
+        f"TOOL BUDGET (strict): You have AT MOST {max_iterations} ROUNDS of "
+        f"tool calls. A round is one assistant turn: you may request several "
+        f"tools in a single turn and they together cost ONE round (a batched "
+        f"think() is included). Use rounds sparingly — plan before you read, "
+        f"decide which files matter, read ONLY those, then answer. Do NOT read "
+        f"files speculatively. If you exhaust the budget, you will be forced to "
+        f"answer from whatever you have so far.\n\n"
         "TOOL RULES:\n"
         "- Use read_file / list_dir / glob_search to ground your analysis in "
         "the ACTUAL code and docs. Do not make claims you cannot verify.\n"
@@ -428,7 +429,7 @@ class ModelManager:
         Args:
             model_config: Synthesizer model to call.
             system_prompt: Strict system prompt governing tool use.
-            user_prompt: The synthesis prompt (anonymous responses + question).
+            user_prompt: The consultant prompt (context + question).
             tool_schemas: OpenAI-style tool schemas to advertise to the model.
             tool_dispatcher: object with `.call(name, arguments) -> str`.
             max_iterations: hard cap on tool-call rounds.

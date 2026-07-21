@@ -66,10 +66,6 @@ class ResponseSynthesizer:
         self.model_manager = model_manager
         self.logger = logger or AICouncilLogger()
 
-    def _label_for(self, model: ModelConfig, anonymous: bool) -> str:
-        """Return the label used for this model's perspective."""
-        return model.code_name if anonymous else model.name
-
     async def collect_perspectives(
         self,
         context: str,
@@ -111,7 +107,6 @@ class ResponseSynthesizer:
             raise ValueError("No models provided")
 
         tools_cfg = self.model_manager.config.synthesizer_tools
-        anonymous = self.model_manager.config.anonymous_perspectives
 
         # Normalize the mode arg: accept CouncilMode, str, or None.
         if isinstance(mode, str):
@@ -139,7 +134,6 @@ class ResponseSynthesizer:
             "mode": mode.value,
             "agentic": agentic,
             "workspace_root": ws_root if agentic else None,
-            "anonymous": anonymous,
             "scope_hint": bool(scope_hint),
             "max_concurrent": self.model_manager.config.max_concurrent_consultants,
             "max_iterations": max_iter,
@@ -191,7 +185,7 @@ class ResponseSynthesizer:
             # answers starting with "Error" and passed empty-content failures
             # off as "ok").
             perspectives.append({
-                "label": self._label_for(model, anonymous),
+                "label": model.name,
                 "model_name": model.name,
                 "code_name": model.code_name,
                 "analysis": result.text,

@@ -95,7 +95,8 @@ class ModelConfig(BaseModel):
         return _resolve_env_placeholders(value, info.field_name)
 
 
-# Default code names for anonymous model identification
+# Short stable handles auto-assigned to each model (Alpha, Beta, …). Returned
+# as `code_name` in every perspective — a compact id for logs and references.
 DEFAULT_CODE_NAMES = [
     "Alpha", "Beta", "Gamma", "Delta", "Epsilon", 
     "Zeta", "Eta", "Theta", "Iota", "Kappa"
@@ -195,13 +196,6 @@ class AICouncilConfig(BaseSettings):
     synthesizer_tools: SynthesizerToolsConfig = Field(
         default_factory=SynthesizerToolsConfig,
         description="Configuration for the consultants' read-only tool loop"
-    )
-
-    # v0.4.0: when true, returned perspectives are labeled Alpha/Beta/Gamma
-    # instead of real model names. Default false = labeled by model name.
-    anonymous_perspectives: bool = Field(
-        default=False,
-        description="If true, label returned perspectives with code names (Alpha/Beta/Gamma) instead of real model names"
     )
 
     # v0.4.1: caps how many consultants run their tool loops concurrently.

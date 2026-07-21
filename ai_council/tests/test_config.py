@@ -58,14 +58,11 @@ def test_synthesizer_tools_max_iterations_bounds():
         )
 
 
-def test_anonymous_perspectives_default_false():
-    cfg = AICouncilConfig(models=_base_models())
-    assert cfg.anonymous_perspectives is False
-
-
-def test_anonymous_perspectives_set_true():
+def test_anonymous_perspectives_field_removed():
+    # The flag was removed (E6/option C): setting it is silently ignored
+    # (extra="ignore"), and the attribute no longer exists.
     cfg = AICouncilConfig(models=_base_models(), anonymous_perspectives=True)
-    assert cfg.anonymous_perspectives is True
+    assert not hasattr(cfg, "anonymous_perspectives")
 
 
 def test_max_concurrent_consultants_default():
