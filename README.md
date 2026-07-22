@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-21, `master`, package version `0.7.0`.
+> **Reflects code as of** — 2026-07-22, `master`, package version `0.7.1`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -145,7 +145,7 @@ entry; when a `consult` call names no subset, only the first `max_models` enable
 | `question` | string | **yes** | The only required argument. Must be non-empty, max **10,000** characters. |
 | `context` | string | no | Background, max **200,000** characters. Optional since v0.7.0. In `scribe` mode this is the only material the models see, so paste file contents here; in `translator`/`scholar` a sentence or two is plenty, because consultants read files themselves. |
 | `mode` | string | no | `scribe` \| `translator` \| `scholar`. See [resolution order](#how-the-effective-mode-is-resolved). |
-| `workspace_root` | string | no | Absolute path used as the read-only sandbox root. Ignored in `scribe`. Falls back to `synthesizer_tools.workspace_root`, then to the **server process's current working directory** — which is set by your MCP client, not by you. Pass it explicitly. |
+| `workspace_root` | string | no | Absolute path used as the read-only sandbox root. Ignored in `scribe`. Must be an existing directory — a bad path fails the call with `INVALID_INPUT` (v0.7.1), it no longer degrades to a silent no-tools run. Falls back to `synthesizer_tools.workspace_root`, then to the **server process's current working directory** — which is set by your MCP client, not by you, and is **refused** when it is a home directory or filesystem root. Pass it explicitly. |
 | `scope_hint` | string | no | Free text injected into each consultant's system prompt, e.g. `"Start with main.py and config.py"`. Ignored in `scribe`. |
 | `models` | array of strings | no | Subset of consultant `name` values to fire. Resolves against **all** enabled models, so any enabled model is reachable regardless of `max_models` or its position in the YAML. Unknown names are dropped silently; if none survive, the call fails with `NO_MATCHING_MODELS`. Omit to fire the default window (first `max_models` enabled). |
 | `agentic` | boolean | no | Deprecated alias: `false` → `scribe`, `true` → `translator`. Overridden by `mode`. |
@@ -233,7 +233,7 @@ identically either way.
 
 | `code` | Fires when |
 | --- | --- |
-| `INVALID_INPUT` | `question` is empty, or `question`/`context` is over its character cap |
+| `INVALID_INPUT` | `question` is empty, `question`/`context` is over its character cap, or a `translator`/`scholar` call has no usable sandbox root (nonexistent path, or an implicit cwd fallback landing on a home/filesystem root) |
 | `NO_MATCHING_MODELS` | A `models` array was passed and matched no enabled model |
 | `NOT_ENOUGH_MODELS_ENABLED` | The fireable roster is empty (startup validation normally prevents this) |
 | `ALL_MODELS_FAILED` | Every consultant errored or the whole batch timed out |
@@ -262,6 +262,8 @@ main.py::_process_ai_council
 synthesis.py::collect_perspectives
   ├─ mode          mode arg > agentic bool > synthesizer_tools.enabled
   ├─ sandbox       workspace_root arg > config workspace_root > process cwd
+  │                must be an existing dir · implicit cwd refused when home or
+  │                filesystem root · bad root → INVALID_INPUT (v0.7.1)
   └─ budget        scholar → scholar_max_tool_iterations · else max_tool_iterations
   │
   ├── scribe ───────────► models.py::call_models_parallel
@@ -336,9 +338,11 @@ mkdir -p ~/.config/ai-council && mv config.example.yaml ~/.config/ai-council/con
 `~/.config/ai-council/config.yaml` is the path the server checks when `--config` is omitted. Any
 other location works if you pass `--config /absolute/path.yaml`.
 
-⚠ If the path you pass to `--config` does not exist, it is **ignored without an error**. The
-server then boots on built-in defaults, whose roster is three OpenRouter models — so the symptom
-of a typo'd path is usually `OpenRouter API key is required`, not "file not found".
+If the path you pass to `--config` does not exist, the server refuses to start with
+`Configuration error: Config file not found: <path>` (v0.7.1 — it was previously ignored
+silently, booting on built-in OpenRouter defaults instead). There is still no fallback to
+`~/.config/ai-council/config.yaml` when `--config` is passed; that path is only probed when the
+flag is omitted entirely.
 
 ### Step 2 — register the server with your MCP client
 
@@ -444,7 +448,7 @@ file as documentation of defaults.
 | `openai_api_key` | unset | commented out | string |
 | `openrouter_api_key` | unset | commented out | string |
 | `synthesizer_tools.enabled` | `false` | `true` | boolean |
-| `synthesizer_tools.workspace_root` | `null` → process cwd | `null` | absolute path |
+| `synthesizer_tools.workspace_root` | `null` → process cwd (refused when home / fs root) | `null` | absolute path to an existing directory |
 | `synthesizer_tools.max_tool_iterations` | `8` | `12` | 1–128 |
 | `synthesizer_tools.scholar_max_tool_iterations` | `64` | `64` | 1–256 |
 | `synthesizer_tools.allowed_tools` | all four | all four | subset of the four tool names — ⚠ omit the key (**null**) for all four; `[]` permits **none** |
@@ -743,8 +747,18 @@ in code.
 | ⚠ | Detail |
 | --- | --- |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
-| Reported `mode` | Is the mode you *asked for*. If agentic setup raises, the run silently degrades to plain no-tool calls but the perspectives are still tagged `translator`/`scholar`. `synthesis.py:169-180`, stamped at `synthesis.py:194` |
-| Missing config path | `--config /typo.yaml` is ignored silently and built-in defaults take over — including their OpenRouter roster. There is no fallback to `~/.config/ai-council/config.yaml`; that path is only probed when `--config` is omitted entirely. `config.py:274-277` |
+
+> **Fixed in v0.7.1 — the lying edges.** Two long-documented sharp edges were resolved. (1) A
+> `translator`/`scholar` call now validates its sandbox root **before any consultant fires**: a
+> nonexistent `workspace_root` fails the call with `INVALID_INPUT` instead of silently degrading
+> to a no-tools run still tagged with the requested mode — and if the fallback path ever does fire
+> (unexpected setup failure), the perspectives are stamped with the mode that actually ran
+> (`scribe`). The implicit cwd fallback is refused when it lands on a home directory or filesystem
+> root; passing such a path explicitly still works. (2) A typo'd `--config` path is now a startup
+> error instead of a silent boot on built-in OpenRouter defaults. `synthesis.py`, `main.py`,
+> `config.py`.
+
+<!-- -->
 
 > **Added in v0.7.0 — telemetry and progress.** Every perspective now carries a `telemetry` block:
 > which files that consultant actually read, how many tool rounds it spent against its budget, its
@@ -840,9 +854,10 @@ every tool call each consultant makes.
 | Sandbox, the four tools, path resolution, tool schemas | [`ai_council/tools.py`](ai_council/tools.py) |
 | Structured stderr logging | [`ai_council/logger.py`](ai_council/logger.py) |
 
-Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 113 tests cover
-config parsing, sandbox path resolution, the tool loop, mode resolution, prompt assembly, transient
-retry, and the discoverability contract. All model I/O is stubbed — no test hits a live endpoint.
+Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 134 tests cover
+config parsing, sandbox path resolution, the tool loop, mode resolution, workspace-root
+validation, prompt assembly, transient retry, telemetry, progress notifications, and the
+discoverability contract. All model I/O is stubbed — no test hits a live endpoint.
 
 ---
 

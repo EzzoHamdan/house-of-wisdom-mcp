@@ -1,7 +1,7 @@
 # PLAN — Possible enhancements
 
 > Status: draft
-> Created: 2026-07-21 · Last updated: 2026-07-21
+> Created: 2026-07-21 · Last updated: 2026-07-22
 > Owns: non-defect improvements (robustness, ergonomics, test coverage, performance) for `ai_council/` at commit `c9be2e0` (v0.6.1) · Does not own: correctness/security bugs → [bugs-and-issues.md](bugs-and-issues.md)
 > Done when: each item is either adopted (with a linked change) or explicitly declined with a reason.
 
@@ -287,8 +287,10 @@ done:     E1 retry · E2 tests · E3 scribe cap · E4 client cache · E6 remove 
 deferred: E5 split timeout  (owner decision — revisit on a concrete need)
 ```
 
-Suite is **127 passing**. Every enhancement is resolved except E5, which is intentionally deferred.
-E1–E11 released as **v0.6.3**; E12–E14 land in **v0.7.0** alongside the discoverability work.
+Suite is **134 passing** (127 when E12–E14 landed; v0.7.1's workspace-root validation and
+config-path fixes added seven). Every enhancement is resolved except E5, which is intentionally
+deferred. E1–E11 released as **v0.6.3**; E12–E14 land in **v0.7.0** alongside the discoverability
+work.
 
 > **Note on what changed between them.** E1–E11 made the server more correct. E12–E14 make it more
 > *usable by an agent* — the same theme as the v0.7.0 interface work: the code was mature well
