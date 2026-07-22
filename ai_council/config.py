@@ -418,14 +418,20 @@ def load_config(
         default_path = Path.home() / ".config" / "ai-council" / "config.yaml"
         if default_path.exists():
             config_file = str(default_path)
+    elif not Path(config_file).exists():
+        # An explicitly passed path that does not exist used to be ignored
+        # silently: built-in defaults (an OpenRouter roster) took over, so the
+        # symptom of a typo'd --config was "OpenRouter API key is required"
+        # rather than anything naming the real problem.
+        raise ValueError(f"Config file not found: {config_file}")
 
     # Populate the environment from .env files BEFORE constructing the settings,
     # so AI_COUNCIL_-prefixed keys and any ${ENV_VAR} placeholders can resolve.
     _load_dotenv_files(config_file)
 
-    # Load from YAML file if it exists
+    # Load from YAML file if one was found (existence already checked above)
     yaml_data = {}
-    if config_file and Path(config_file).exists():
+    if config_file:
         try:
             with open(config_file, 'r') as f:
                 yaml_data = yaml.safe_load(f) or {}

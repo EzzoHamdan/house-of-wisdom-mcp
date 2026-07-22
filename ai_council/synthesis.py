@@ -1,10 +1,52 @@
 import os
 from dataclasses import asdict
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from .models import ModelConfig, ModelManager
 from .logger import AICouncilLogger
 from .tools import ToolRegistry, filter_schemas
+
+
+class WorkspaceRootError(ValueError):
+    """Raised when the sandbox root for an agentic call is unusable.
+
+    A distinct type so main.py can report it as a caller mistake
+    (INVALID_INPUT) rather than a server fault (INTERNAL_ERROR).
+    """
+
+
+def _resolve_workspace_root(
+    override: Optional[str], configured: Optional[str]
+) -> str:
+    """Resolve and validate the sandbox root for an agentic call.
+
+    Precedence: per-call override > config > process cwd. The result must be
+    an existing directory — a bad root used to surface only when ToolRegistry
+    construction raised, which the degradation fallback then swallowed: the
+    call silently ran without tools while its perspectives stayed tagged
+    translator/scholar.
+
+    The cwd fallback is refused when it lands on the user's home directory or
+    a filesystem root. MCP clients launch servers from directories the user
+    never chose, and "every consultant may read all of $HOME" is too much
+    blast radius to grant implicitly. Passing such a path EXPLICITLY (per-call
+    argument or config) is still honored — then it is a deliberate choice.
+    """
+    explicit = override or configured
+    root = Path(explicit if explicit else os.getcwd()).resolve()
+    if not root.is_dir():
+        raise WorkspaceRootError(
+            f"workspace_root is not an existing directory: {root}. "
+            "Pass an absolute path to the project you want consultants to read."
+        )
+    if not explicit and (root == Path.home().resolve() or root == Path(root.anchor)):
+        raise WorkspaceRootError(
+            f"workspace_root was not provided and the server's working "
+            f"directory is {root} — a home or filesystem root, which is too "
+            "broad to expose implicitly. Pass workspace_root explicitly."
+        )
+    return str(root)
 
 
 class CouncilMode(str, Enum):
@@ -123,10 +165,20 @@ class ResponseSynthesizer:
         # boolean > config default.
         if mode is None:
             mode = CouncilMode.from_agentic(agentic_override, tools_cfg.enabled)
-        ws_root = workspace_root_override or tools_cfg.workspace_root or os.getcwd()
 
         # Mode -> budget + scope-cage semantics
         agentic = mode != CouncilMode.SCRIBE
+        # Validated BEFORE any consultant fires, and only when a mode that
+        # reads files was requested — scribe has no sandbox to root. A bad
+        # root is the caller's error and must fail the call loudly, not
+        # degrade it (see WorkspaceRootError).
+        ws_root = (
+            _resolve_workspace_root(
+                workspace_root_override, tools_cfg.workspace_root
+            )
+            if agentic
+            else None
+        )
         if mode == CouncilMode.SCHOLAR:
             max_iter = tools_cfg.scholar_max_tool_iterations
         else:
@@ -135,7 +187,7 @@ class ResponseSynthesizer:
         self.logger.info(f"Collecting perspectives from {len(models)} consultants", {
             "mode": mode.value,
             "agentic": agentic,
-            "workspace_root": ws_root if agentic else None,
+            "workspace_root": ws_root,
             "scope_hint": bool(scope_hint),
             "max_concurrent": self.model_manager.config.max_concurrent_consultants,
             "max_iterations": max_iter,
@@ -173,6 +225,11 @@ class ResponseSynthesizer:
                     f"Agentic perspective collection failed, falling back to "
                     f"plain parallel calls: {e}"
                 )
+                # The fallback runs WITHOUT tools, so the perspectives must
+                # say so. Stamping the requested translator/scholar on a run
+                # that never had file access presented ungrounded answers as
+                # grounded ones (files_read: [] was the only tell).
+                mode = CouncilMode.SCRIBE
                 analyses = await self.model_manager.call_models_parallel(
                     models, context, question, progress_cb=progress_cb
                 )

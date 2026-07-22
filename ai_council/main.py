@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .models import ModelManager, ConfigValidationError
-from .synthesis import ResponseSynthesizer
+from .synthesis import ResponseSynthesizer, WorkspaceRootError
 from .logger import AICouncilLogger
 from .config import load_config
 
@@ -495,14 +495,27 @@ class AICouncilServer:
         self.logger.info("Dispatching calls to all consultants in parallel")
         parallel_start = time.time()
 
-        perspectives = await self.synthesizer.collect_perspectives(
-            context, question, models,
-            workspace_root_override=workspace_root,
-            agentic_override=agentic_override,
-            scope_hint=scope_hint,
-            mode=mode_arg,
-            progress_cb=self._make_progress_cb(),
-        )
+        try:
+            perspectives = await self.synthesizer.collect_perspectives(
+                context, question, models,
+                workspace_root_override=workspace_root,
+                agentic_override=agentic_override,
+                scope_hint=scope_hint,
+                mode=mode_arg,
+                progress_cb=self._make_progress_cb(),
+            )
+        except WorkspaceRootError as e:
+            # The caller asked for a mode that reads files but gave no usable
+            # sandbox root. This is their input to fix, not a server fault —
+            # and it must not degrade into a silent no-tools run.
+            return ErrorResponse(
+                error=ErrorInfo(
+                    code="INVALID_INPUT",
+                    message="workspace_root validation failed",
+                    type="user_input_error",
+                    details=str(e)
+                )
+            )
         parallel_duration = time.time() - parallel_start
 
         ok_count = sum(1 for p in perspectives if p["status"] == "ok")

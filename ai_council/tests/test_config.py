@@ -216,6 +216,15 @@ def test_dotenv_does_not_override_real_env(tmp_path, monkeypatch):
     assert os.environ["AI_COUNCIL_OPENAI_API_KEY"] == "sk-from-real-env"
 
 
+def test_explicit_missing_config_path_is_an_error(tmp_path):
+    """--config /typo.yaml used to be ignored silently: built-in defaults (an
+    OpenRouter roster) took over and the symptom was 'OpenRouter API key is
+    required' instead of anything naming the real problem (README sharp edge).
+    Now the typo fails loudly at startup."""
+    with pytest.raises(ValueError, match="Config file not found"):
+        load_config(str(tmp_path / "typo.yaml"))
+
+
 def test_load_config_reads_dotenv_and_applies_prefixed_key(tmp_path, monkeypatch):
     """End-to-end: a .env beside the config feeds the AI_COUNCIL_-prefixed key."""
     monkeypatch.delenv("AI_COUNCIL_OPENROUTER_API_KEY", raising=False)
