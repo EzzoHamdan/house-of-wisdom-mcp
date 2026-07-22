@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-22, `master`, package version `0.9.0`.
+> **Reflects code as of** — 2026-07-22, `master`, package version `0.9.1`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -215,6 +215,8 @@ nothing. It just stops you from having to take each analysis on faith.
 | `tokens_in` / `tokens_out` / `api_calls` | Summed across **every** completion, including retry nudges and forced-final turns. Taken from the provider's own `usage` block; providers that omit it contribute zero. |
 | `cost_usd` | Computed from the model's configured rates. `null` when unpriced. |
 | `duration_s` | Wall-clock for this one consultant, reported even when it errored or timed out — a failed call still cost you something. |
+| `finish_reason` | v0.9.1. The provider's own stop reason for the completion whose text became the answer (`stop`, `length`, …). `null` when the provider reported none. |
+| `truncated` | v0.9.1. Derived from `finish_reason`: `true` means the answer was cut off at the output-token cap and may be incomplete. **Tri-state** — `null` means the provider never said, which is "unknown", not "no". |
 
 Read `files_read` first. It is the difference between a perspective grounded in your codebase and
 one that merely sounds grounded, and it changes what disagreement means:
@@ -293,7 +295,7 @@ perspectives[]   one per dispatched model, roster order, failures included
 MCP client weighs them.  No synthesizer runs, in any mode.
 ```
 
-#### How a call flows (rendered)
+### How a call flows (rendered)
 
 ```mermaid
 %%{init: {'themeVariables': {'lineColor': '#8b949e'}}}%%
@@ -357,7 +359,7 @@ flag is omitted entirely.
 
 The launch command is identical everywhere; only the surrounding JSON/TOML differs.
 
-```
+```text
 command:  uvx
 args:     --from  git+https://github.com/EzzoHamdan/house-of-wisdom-mcp@master
           ai-council
@@ -743,6 +745,13 @@ reject the latter). If a model still rejects a parameter — e.g. reasoning mode
 default `temperature: 1` — that parameter is dropped and the call retried (up to three strips).
 `custom` / `openrouter` endpoints are sent the classic `max_tokens` / `temperature` unchanged.
 
+One rejection needs the opposite adaptation (v0.9.1): OpenAI **reasoning models refuse function
+tools** on `/v1/chat/completions` unless `reasoning_effort` is `'none'` — a parameter the server
+never sends, so there is nothing to strip. That specific 400 is retried once with
+`reasoning_effort: "none"`, and the model is remembered so a tool loop pays the discovery request
+once, not once per round. The trade is explicit: on such models, `translator`/`scholar` run
+**without extended reasoning** rather than not at all; `scribe` (no tools) is unaffected.
+
 ⚠ Because `parallel_timeout` also bounds the whole batch, and because queued consultants spend
 their wait inside that window, a `scholar` run with more models than
 `max_concurrent_consultants` needs a generous value. When the batch timeout fires, only the
@@ -760,6 +769,15 @@ in code.
 | ⚠ | Detail |
 | --- | --- |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
+
+> **Fixed in v0.9.1 — reasoning models with tools, and visible truncation.** OpenAI reasoning
+> models rejected every tool-bearing call (`translator`/`scholar` died on round one) because
+> chat completions requires `reasoning_effort: 'none'` for function tools — now detected and
+> adapted automatically, at the documented cost of running those modes without extended
+> reasoning. And telemetry gained `finish_reason` / `truncated`, closing the gap where an answer
+> cut off at the token cap was indistinguishable from a complete one. `models.py`, `main.py`.
+
+<!-- -->
 
 > **Added in v0.9.0 — content search, CI, and packaging.** A fifth sandbox tool,
 > `content_search`, greps file contents by regex (`path:line: text` hits, bounded at 100 matches /
@@ -888,7 +906,7 @@ every tool call each consultant makes.
 | Sandbox, the five tools, path resolution, tool schemas | [`ai_council/tools.py`](ai_council/tools.py) |
 | Structured stderr logging | [`ai_council/logger.py`](ai_council/logger.py) |
 
-Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 162 tests cover
+Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 170 tests cover
 config parsing, sandbox path resolution, the tool loop, mode resolution, workspace-root
 validation, per-call override clamping, content search, prompt assembly, transient retry,
 telemetry, progress notifications, and the discoverability contract. All model I/O is stubbed —

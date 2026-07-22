@@ -292,10 +292,11 @@ done:     E1 retry · E2 tests · E3 scribe cap · E4 client cache · E6 remove 
 deferred: E5 split timeout  (owner decision — revisit on a concrete need)
 ```
 
-Suite is **162 passing** (127 when E12–E14 landed; v0.7.1's sharp-edge fixes, v0.8.0's per-call
-override clamping, and v0.9.0's content_search added the rest). Every enhancement is resolved
-except E5, which is intentionally deferred. E1–E11 released as **v0.6.3**; E12–E14 land in
-**v0.7.0** alongside the discoverability work.
+Suite is **170 passing** (127 when E12–E14 landed; v0.7.1's sharp-edge fixes, v0.8.0's per-call
+override clamping, v0.9.0's content_search, and v0.9.1's reasoning-model adaptation + truncation
+telemetry added the rest). Every enhancement is resolved except E5, which is intentionally
+deferred. E1–E11 released as **v0.6.3**; E12–E14 land in **v0.7.0** alongside the discoverability
+work.
 
 > **Note on what changed between them.** E1–E11 made the server more correct. E12–E14 make it more
 > *usable by an agent* — the same theme as the v0.7.0 interface work: the code was mature well
