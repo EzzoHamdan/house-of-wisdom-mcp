@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-22, `master`, package version `0.7.1`.
+> **Reflects code as of** — 2026-07-22, `master`, package version `0.8.0`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -77,6 +77,11 @@ With default budgets, wall-clock ordering runs `scribe` < `translator` < `schola
 numbers depend entirely on which models you configured and whether they are local or remote.
 Nothing enforces that ordering, though — raising `max_tool_iterations` above
 `scholar_max_tool_iterations` inverts it.
+
+Since v0.8.0 the depths between the presets are reachable per call: `tool_budget` lowers the
+resolved mode's round budget and `timeout` lowers the wall-clock deadline, both clamped to the
+configured values — see [the `consult` arguments](#consult). A caller can never raise either
+above what the config allows.
 
 ### How the effective mode is resolved
 
@@ -149,6 +154,8 @@ entry; when a `consult` call names no subset, only the first `max_models` enable
 | `scope_hint` | string | no | Free text injected into each consultant's system prompt, e.g. `"Start with main.py and config.py"`. Ignored in `scribe`. |
 | `models` | array of strings | no | Subset of consultant `name` values to fire. Resolves against **all** enabled models, so any enabled model is reachable regardless of `max_models` or its position in the YAML. Unknown names are dropped silently; if none survive, the call fails with `NO_MATCHING_MODELS`. Omit to fire the default window (first `max_models` enabled). |
 | `agentic` | boolean | no | Deprecated alias: `false` → `scribe`, `true` → `translator`. Overridden by `mode`. |
+| `tool_budget` | integer ≥ 1 | no | v0.8.0. Max tool-call **rounds** per consultant for this call — the depth dial between the mode presets (`scholar` + `tool_budget: 20` sits between translator's 8 and scholar's 64). **Clamped to the resolved mode's configured budget, never above it.** Ignored in `scribe`. The effective (clamped) value is reported in each perspective's `tool_rounds_budget`. |
+| `timeout` | integer ≥ 5 | no | v0.8.0. Wall-clock seconds for this call, applied per consultant **and** to the whole batch — the same double application as `parallel_timeout`, which it overrides downward. **Clamped to the configured `parallel_timeout`, never above it** — it makes a quick check cheap; it cannot extend a deep run. |
 
 **Success shape.** One entry per model that was dispatched, in roster order:
 
@@ -233,7 +240,7 @@ identically either way.
 
 | `code` | Fires when |
 | --- | --- |
-| `INVALID_INPUT` | `question` is empty, `question`/`context` is over its character cap, or a `translator`/`scholar` call has no usable sandbox root (nonexistent path, or an implicit cwd fallback landing on a home/filesystem root) |
+| `INVALID_INPUT` | `question` is empty, `question`/`context` is over its character cap, `tool_budget`/`timeout` is not an integer within its floor (1 / 5), or a `translator`/`scholar` call has no usable sandbox root (nonexistent path, or an implicit cwd fallback landing on a home/filesystem root) |
 | `NO_MATCHING_MODELS` | A `models` array was passed and matched no enabled model |
 | `NOT_ENOUGH_MODELS_ENABLED` | The fireable roster is empty (startup validation normally prevents this) |
 | `ALL_MODELS_FAILED` | Every consultant errored or the whole batch timed out |
@@ -264,7 +271,9 @@ synthesis.py::collect_perspectives
   ├─ sandbox       workspace_root arg > config workspace_root > process cwd
   │                must be an existing dir · implicit cwd refused when home or
   │                filesystem root · bad root → INVALID_INPUT (v0.7.1)
-  └─ budget        scholar → scholar_max_tool_iterations · else max_tool_iterations
+  ├─ budget        scholar → scholar_max_tool_iterations · else max_tool_iterations
+  │                per-call tool_budget lowers it (min of the two), never raises
+  └─ deadline      parallel_timeout · per-call timeout lowers it, never raises
   │
   ├── scribe ───────────► models.py::call_models_parallel
   │                        one chat call per model · temp 0.7 · max_tokens 8000
@@ -720,6 +729,9 @@ outside.
 | `scribe` (`call_model`) | 0.7 | 8,000 | `parallel_timeout`, applied to the whole batch |
 | `translator` / `scholar` (`call_model_with_tools`) | 0.4 | 16,000 | `parallel_timeout`, applied **both** per consultant and to the whole batch |
 
+A per-call `timeout` argument (v0.8.0) substitutes for `parallel_timeout` in both rows — same
+double application — but only downward: it is clamped to the configured value.
+
 Empty responses get one automatic retry. Models that return their answer in a `reasoning`,
 `thinking`, or `reasoning_content` field instead of `content` — common with Ollama's cloud
 thinking models — are handled by `models.py::_extract_text`.
@@ -747,6 +759,16 @@ in code.
 | ⚠ | Detail |
 | --- | --- |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
+
+> **Added in v0.8.0 — per-call depth dials.** `consult` gained optional `tool_budget` (max tool
+> rounds per consultant) and `timeout` (wall-clock seconds) arguments. Both are **clamped to the
+> operator's configured ceilings** — the resolved mode's round budget and `parallel_timeout`
+> respectively — so a caller can dial a call down (a 20-round scholar, a 30-second sanity check)
+> but never past what the config allows. Invalid values fail as `INVALID_INPUT`; the effective
+> budget is visible in each perspective's `tool_rounds_budget`. `main.py`, `synthesis.py`,
+> `models.py`.
+
+<!-- -->
 
 > **Fixed in v0.7.1 — the lying edges.** Two long-documented sharp edges were resolved. (1) A
 > `translator`/`scholar` call now validates its sandbox root **before any consultant fires**: a
@@ -854,10 +876,11 @@ every tool call each consultant makes.
 | Sandbox, the four tools, path resolution, tool schemas | [`ai_council/tools.py`](ai_council/tools.py) |
 | Structured stderr logging | [`ai_council/logger.py`](ai_council/logger.py) |
 
-Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 134 tests cover
+Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 151 tests cover
 config parsing, sandbox path resolution, the tool loop, mode resolution, workspace-root
-validation, prompt assembly, transient retry, telemetry, progress notifications, and the
-discoverability contract. All model I/O is stubbed — no test hits a live endpoint.
+validation, per-call override clamping, prompt assembly, transient retry, telemetry, progress
+notifications, and the discoverability contract. All model I/O is stubbed — no test hits a live
+endpoint.
 
 ---
 

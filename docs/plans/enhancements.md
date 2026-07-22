@@ -113,6 +113,11 @@ endpoint is shared across models, distinct endpoints stay separate.
 **Status.** Deferred by owner decision — lowest value of the batch, only worth it given a concrete
 slow-straggler need. Left as-is for now.
 
+> **Related but distinct (v0.8.0):** `consult` now takes a per-call `timeout` argument, clamped to
+> `parallel_timeout`. It lets a *caller* lower the single value per call, but the two applications
+> (per consultant, whole batch) still share that one value — the split this item describes remains
+> unbuilt.
+
 **Today.** `parallel_timeout` is applied twice with the same value: once per consultant inside
 `call_model_with_tools` (`models.py:302`, via `asyncio.wait_for`) and once to the whole batch in
 `_gather_consultants`. Queued consultants (behind the semaphore) burn their wait inside the batch
@@ -287,10 +292,10 @@ done:     E1 retry · E2 tests · E3 scribe cap · E4 client cache · E6 remove 
 deferred: E5 split timeout  (owner decision — revisit on a concrete need)
 ```
 
-Suite is **134 passing** (127 when E12–E14 landed; v0.7.1's workspace-root validation and
-config-path fixes added seven). Every enhancement is resolved except E5, which is intentionally
-deferred. E1–E11 released as **v0.6.3**; E12–E14 land in **v0.7.0** alongside the discoverability
-work.
+Suite is **151 passing** (127 when E12–E14 landed; v0.7.1's sharp-edge fixes and v0.8.0's
+per-call override clamping added the rest). Every enhancement is resolved except E5, which is
+intentionally deferred. E1–E11 released as **v0.6.3**; E12–E14 land in **v0.7.0** alongside the
+discoverability work.
 
 > **Note on what changed between them.** E1–E11 made the server more correct. E12–E14 make it more
 > *usable by an agent* — the same theme as the v0.7.0 interface work: the code was mature well
