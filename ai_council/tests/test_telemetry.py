@@ -338,3 +338,48 @@ def test_no_progress_token_means_no_reporter():
     srv = AICouncilServer(config=_cfg())
     # No active request context at all -> no reporter, no exception.
     assert srv._make_progress_cb() is None
+
+
+# --- finish_reason / truncation (v0.9.1) --------------------------------------
+# A final answer cut off at the token cap looked identical to a complete one —
+# for a future patch deliverable that silence would be fatal (a truncated diff
+# is a malformed diff with no explanation), and it already matters for prose.
+
+def test_finish_reason_recorded_and_not_truncated_on_stop():
+    tel = ConsultantTelemetry()
+    r = _response(SimpleNamespace(content="x"), 1, 1)
+    r.choices[0].finish_reason = "stop"
+    tel.add_usage(r)
+    assert tel.finish_reason == "stop"
+    assert tel.truncated is False
+
+
+def test_truncated_true_on_length():
+    tel = ConsultantTelemetry()
+    r = _response(SimpleNamespace(content="x"), 1, 1)
+    r.choices[0].finish_reason = "length"
+    tel.add_usage(r)
+    assert tel.truncated is True
+
+
+def test_last_completion_wins():
+    """The shipped value must describe the completion whose text became the
+    answer — the last one — not an earlier tool-round completion."""
+    tel = ConsultantTelemetry()
+    first = _response(SimpleNamespace(content=""), 1, 1)
+    first.choices[0].finish_reason = "tool_calls"
+    last = _response(SimpleNamespace(content="answer"), 1, 1)
+    last.choices[0].finish_reason = "length"
+    tel.add_usage(first)
+    tel.add_usage(last)
+    assert tel.finish_reason == "length"
+    assert tel.truncated is True
+
+
+def test_missing_finish_reason_stays_unknown_not_false():
+    """A provider that reports nothing must yield None (unknown) — claiming
+    'not truncated' without evidence would be the same silent lie inverted."""
+    tel = ConsultantTelemetry()
+    tel.add_usage(_response(SimpleNamespace(content="x"), 1, 1))
+    assert tel.finish_reason is None
+    assert tel.truncated is None

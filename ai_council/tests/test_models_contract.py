@@ -62,6 +62,7 @@ def _bare_manager():
     """A ModelManager without running __init__ (skips API-key validation)."""
     mm = ModelManager.__new__(ModelManager)
     mm.logger = AICouncilLogger()
+    mm._reasoning_off_models = set()
     return mm
 
 

@@ -56,6 +56,11 @@ class PerspectiveTelemetry(BaseModel):
     files_read: List[str] = Field(default_factory=list)
     paths_listed: List[str] = Field(default_factory=list)
     tool_calls: Dict[str, int] = Field(default_factory=dict)
+    # v0.9.1: the provider's finish_reason for the completion that produced
+    # the answer, and the truncation flag derived from it. None = the provider
+    # never reported one — unknown, deliberately distinct from False.
+    finish_reason: Optional[str] = None
+    truncated: Optional[bool] = None
 
 
 class Perspective(BaseModel):

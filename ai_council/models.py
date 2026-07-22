@@ -52,6 +52,13 @@ class ConsultantTelemetry:
     files_read: List[str] = field(default_factory=list)
     paths_listed: List[str] = field(default_factory=list)
     tool_calls: Dict[str, int] = field(default_factory=dict)
+    # v0.9.1 — the silent-truncation gap: a final answer cut off at the token
+    # cap looked identical to a complete one. `finish_reason` is the provider's
+    # own word for the LAST completion (the one whose text became the answer);
+    # `truncated` derives from it. Tri-state on purpose: None means the
+    # provider never said, which is "unknown", not "not truncated".
+    finish_reason: Optional[str] = None
+    truncated: Optional[bool] = None
 
     def add_usage(self, response: Any) -> None:
         """Accumulate one completion's token usage, if the provider reported any.
@@ -59,8 +66,18 @@ class ConsultantTelemetry:
         Every branch of the tool loop routes through here, so a consultant that
         burned four completions on retries and forced-final nudges reports all
         four. Providers that omit `usage` simply contribute nothing.
+
+        Also records the completion's `finish_reason`. Later calls overwrite
+        earlier ones, so the value that ships is the final completion's — in
+        every loop path that is the completion whose text became the answer.
         """
         self.api_calls += 1
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            reason = getattr(choices[0], "finish_reason", None)
+            if reason is not None:
+                self.finish_reason = str(reason)
+                self.truncated = self.finish_reason == "length"
         usage = getattr(response, "usage", None)
         if usage is None:
             return
@@ -193,6 +210,10 @@ class ModelManager:
         # per call — and per tool-loop round — discards connection pooling; a
         # SCHOLAR run makes dozens of round-trips per consultant.
         self._client_cache: Dict[tuple, AsyncOpenAI] = {}
+        # Models that proved to need reasoning_effort='none' for tool-bearing
+        # calls (see _tools_need_reasoning_off). Remembered so a tool LOOP pays
+        # the discovery 400 once, not once per round.
+        self._reasoning_off_models: set = set()
         self._apply_log_level()
         self._apply_log_format()
         self._validate_api_keys()
@@ -310,6 +331,25 @@ class ModelManager:
     RETRY_MAX_DELAY = 8.0
 
     @staticmethod
+    def _tools_need_reasoning_off(error: Exception) -> bool:
+        """Detect OpenAI's 400 for function tools on a reasoning model.
+
+        Reasoning models (observed live with gpt-5.6-terra) reject tool-bearing
+        requests on /v1/chat/completions unless ``reasoning_effort`` is
+        ``'none'`` — the error says so explicitly. The generic strip-and-retry
+        can't fix this one: the offending parameter is implicit (we never sent
+        it), so there is nothing in kwargs to strip. Without this, every
+        translator/scholar call on such a model dies on round one.
+        """
+        body = getattr(error, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error") or {}
+            if err.get("param") == "reasoning_effort":
+                return True
+        msg = str(error)
+        return "reasoning_effort" in msg and "not supported" in msg
+
+    @staticmethod
     def _retry_after_seconds(error: Exception) -> Optional[float]:
         """Parse a numeric ``Retry-After`` header (seconds) if the error has one."""
         response = getattr(error, "response", None)
@@ -359,12 +399,35 @@ class ModelManager:
         """
         if "max_tokens" in kwargs and model_config.provider == Provider.OPENAI:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        if (
+            model_config.name in self._reasoning_off_models
+            and kwargs.get("tools")
+            and "reasoning_effort" not in kwargs
+        ):
+            kwargs["reasoning_effort"] = "none"
         strips = 0
         retries = 0
         while True:
             try:
                 return await client.chat.completions.create(model=model_config.model_id, **kwargs)
             except Exception as error:
+                # One-shot adaptation, not counted against strips/retries:
+                # setting reasoning_effort='none' is the documented way to keep
+                # function tools working on chat completions for reasoning
+                # models. The `not in kwargs` guard makes it fire at most once
+                # — if the model still rejects it, the error propagates.
+                if (
+                    "tools" in kwargs
+                    and "reasoning_effort" not in kwargs
+                    and self._tools_need_reasoning_off(error)
+                ):
+                    self.logger.warning(
+                        f"{model_config.name} rejects tools with reasoning "
+                        "enabled; retrying with reasoning_effort='none'"
+                    )
+                    kwargs["reasoning_effort"] = "none"
+                    self._reasoning_off_models.add(model_config.name)
+                    continue
                 param = self._unsupported_param(error)
                 if param and param in kwargs and strips < 3:
                     strips += 1

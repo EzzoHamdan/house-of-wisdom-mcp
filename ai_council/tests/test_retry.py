@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from ai_council import models as models_mod
 from ai_council.config import AICouncilConfig, ModelConfig, Provider
 from ai_council.models import ModelManager
@@ -124,3 +126,92 @@ def test_retry_after_header_honored():
 def test_non_retryable_delay_is_none():
     assert ModelManager._transient_retry_delay(_StatusError(400), attempt=0) is None
     assert ModelManager._transient_retry_delay(ValueError("x"), attempt=0) is None
+
+
+# --- OpenAI reasoning models × function tools (v0.9.1) ------------------------
+# Observed live with gpt-5.6-terra: /v1/chat/completions rejects tool-bearing
+# requests from reasoning models unless reasoning_effort='none'. The offending
+# parameter is implicit (never sent), so strip-and-retry can't fix it.
+
+
+class _ReasoningToolsError(Exception):
+    def __init__(self):
+        super().__init__(
+            "Error code: 400 - Function tools with reasoning_effort are not "
+            "supported for gpt-x in /v1/chat/completions. To use function "
+            "tools, use /v1/responses or set reasoning_effort to 'none'."
+        )
+        self.body = {"error": {"param": "reasoning_effort", "message": str(self)}}
+
+
+class _KwargsRecorder:
+    def __init__(self, seq):
+        self.seq = seq
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        item = self.seq[len(self.calls) - 1]
+        if isinstance(item, Exception):
+            raise item
+        return SimpleNamespace(choices=[SimpleNamespace(message=item)])
+
+
+def _tools_kwargs():
+    return {
+        "messages": [{"role": "user", "content": "q"}],
+        "tools": [{"type": "function", "function": {"name": "read_file"}}],
+    }
+
+
+def test_reasoning_tools_400_retried_with_effort_none(monkeypatch):
+    cfg, mgr = _manager()
+    delays = _no_sleep(monkeypatch)
+    rec = _KwargsRecorder([_ReasoningToolsError(), SimpleNamespace(content="ok")])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=rec))
+    result = asyncio.run(mgr._create_completion(client, cfg.models[0], **_tools_kwargs()))
+    assert result.choices[0].message.content == "ok"
+    assert len(rec.calls) == 2
+    assert "reasoning_effort" not in rec.calls[0]
+    assert rec.calls[1]["reasoning_effort"] == "none"
+    assert delays == []  # immediate adaptation, no backoff sleep
+    assert cfg.models[0].name in mgr._reasoning_off_models
+
+
+def test_reasoning_off_is_remembered_across_calls(monkeypatch):
+    """A tool LOOP must pay the discovery 400 once, not once per round."""
+    cfg, mgr = _manager()
+    _no_sleep(monkeypatch)
+    first = _KwargsRecorder([_ReasoningToolsError(), SimpleNamespace(content="ok")])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=first))
+    asyncio.run(mgr._create_completion(client, cfg.models[0], **_tools_kwargs()))
+
+    second = _KwargsRecorder([SimpleNamespace(content="ok")])
+    client2 = SimpleNamespace(chat=SimpleNamespace(completions=second))
+    asyncio.run(mgr._create_completion(client2, cfg.models[0], **_tools_kwargs()))
+    assert second.calls[0]["reasoning_effort"] == "none"  # preemptive, no 400
+
+
+def test_no_adaptation_without_tools(monkeypatch):
+    """The same 400 on a tool-less call is not ours to fix — it propagates."""
+    cfg, mgr = _manager()
+    _no_sleep(monkeypatch)
+    rec = _KwargsRecorder([_ReasoningToolsError()])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=rec))
+    with pytest.raises(_ReasoningToolsError):
+        asyncio.run(mgr._create_completion(
+            client, cfg.models[0], messages=[{"role": "user", "content": "q"}],
+        ))
+    assert len(rec.calls) == 1
+
+
+def test_adaptation_fires_at_most_once(monkeypatch):
+    """If the model still rejects after reasoning_effort='none', propagate —
+    no infinite adapt loop."""
+    cfg, mgr = _manager()
+    _no_sleep(monkeypatch)
+    rec = _KwargsRecorder([_ReasoningToolsError(), _ReasoningToolsError()])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=rec))
+    with pytest.raises(_ReasoningToolsError):
+        asyncio.run(mgr._create_completion(client, cfg.models[0], **_tools_kwargs()))
+    assert len(rec.calls) == 2
