@@ -288,6 +288,26 @@ class AICouncilServer:
                                     "If none of the names match any enabled model, the call fails. "
                                     "Omit to use all enabled models (subject to max_models cap)."
                                 )
+                            },
+                            "tool_budget": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": (
+                                    "Optional. Max tool-call ROUNDS per consultant for this call — use it to "
+                                    "dial investigation depth between the mode presets (e.g. scholar with "
+                                    "tool_budget 20). Clamped to the server's configured budget for the "
+                                    "resolved mode, never above it. Ignored in scribe (no tools)."
+                                )
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 5,
+                                "description": (
+                                    "Optional. Wall-clock budget for this call in seconds, applied per "
+                                    "consultant and to the whole batch. Clamped to the server's configured "
+                                    "parallel_timeout, never above it — use it to make a quick check cheap, "
+                                    "not to extend a deep one."
+                                )
                             }
                         },
                         "required": ["question"]
@@ -364,6 +384,27 @@ class AICouncilServer:
         if len(question) > 10000:
             raise ValueError("Question too long (max 10,000 characters)")
     
+    @staticmethod
+    def _optional_positive_int(value: Any, name: str, minimum: int) -> Optional[int]:
+        """Parse an optional integer argument, requiring it to be >= minimum.
+
+        None passes through (the config default applies). Strings of digits are
+        accepted for lenient clients (matching how `agentic` tolerates strings);
+        anything else — floats, negatives, zero, junk text — raises ValueError
+        so the caller gets INVALID_INPUT naming the bad argument.
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+        if parsed < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+        return parsed
+
     def _make_progress_cb(self):
         """Build a per-consultant progress reporter bound to the current request.
 
@@ -438,10 +479,19 @@ class AICouncilServer:
             mode_arg = mode_arg.strip().lower()
         else:
             mode_arg = None
-        
+
         # Validate input parameters
         try:
             self._validate_input(context, question)
+            # v0.8.0 per-call overrides. Validated here (caller mistake →
+            # INVALID_INPUT); CLAMPED to the operator's config in
+            # collect_perspectives — a caller can dial down, never up.
+            tool_budget = self._optional_positive_int(
+                arguments.get("tool_budget"), "tool_budget", minimum=1
+            )
+            timeout = self._optional_positive_int(
+                arguments.get("timeout"), "timeout", minimum=5
+            )
         except ValueError as e:
             return ErrorResponse(
                 error=ErrorInfo(
@@ -503,6 +553,8 @@ class AICouncilServer:
                 scope_hint=scope_hint,
                 mode=mode_arg,
                 progress_cb=self._make_progress_cb(),
+                tool_budget=tool_budget,
+                timeout=timeout,
             )
         except WorkspaceRootError as e:
             # The caller asked for a mode that reads files but gave no usable

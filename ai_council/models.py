@@ -774,6 +774,7 @@ class ModelManager:
         context: str,
         question: str,
         progress_cb: Optional[ProgressCallback] = None,
+        timeout: Optional[int] = None,
     ) -> List[ConsultantResult]:
         """Call multiple models in parallel, keeping whatever completed.
 
@@ -782,6 +783,9 @@ class ModelManager:
         every model at once and could exceed a provider's concurrency allowance
         (e.g. Ollama Cloud Pro = 3), tripping the 429s the retry layer then has
         to absorb. Models beyond the cap queue and run as slots free up.
+
+        ``timeout`` (v0.8.0) is the per-call override, already clamped to the
+        configured ``parallel_timeout`` by the caller; None means config value.
         """
         if not models:
             raise ValueError("No models provided for parallel calls")
@@ -794,7 +798,8 @@ class ModelManager:
 
         coros = [_run_one(model) for model in models]
         return await self._gather_consultants(
-            coros, models, self.config.parallel_timeout, progress_cb=progress_cb
+            coros, models, timeout or self.config.parallel_timeout,
+            progress_cb=progress_cb,
         )
 
     async def call_models_parallel_agentic(
@@ -808,6 +813,7 @@ class ModelManager:
         scope_hint: Optional[str] = None,
         mode_guidance: Optional[str] = None,
         progress_cb: Optional[ProgressCallback] = None,
+        timeout: Optional[int] = None,
     ) -> List[ConsultantResult]:
         """Run a tool-calling loop for every consultant, concurrency-capped.
 
@@ -835,7 +841,10 @@ class ModelManager:
         if len(tool_registries) != len(models):
             raise ValueError("tool_registries must match models length")
 
-        timeout = self.config.parallel_timeout
+        # The per-call override (already clamped to config by the caller)
+        # replaces the configured value for BOTH applications of the timeout:
+        # the whole batch below, and each consultant's own loop via _run_one.
+        timeout = timeout or self.config.parallel_timeout
         max_concurrent = self.config.max_concurrent_consultants
         semaphore = asyncio.Semaphore(max_concurrent)
         self.logger.info(
@@ -868,6 +877,7 @@ class ModelManager:
                     tool_schemas=tool_schemas,
                     tool_dispatcher=registry,
                     max_iterations=max_iterations,
+                    timeout=timeout,
                 )
 
         coros = [

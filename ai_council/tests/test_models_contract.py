@@ -28,7 +28,8 @@ class _FakeModelManager:
         self.config = config
         self._results = results
 
-    async def call_models_parallel(self, models, context, question, progress_cb=None):
+    async def call_models_parallel(self, models, context, question,
+                                   progress_cb=None, timeout=None):
         return self._results
 
 

@@ -119,6 +119,8 @@ class ResponseSynthesizer:
         scope_hint: Optional[str] = None,
         mode: Any = None,
         progress_cb: Optional[Callable[[int, int, str], Any]] = None,
+        tool_budget: Optional[int] = None,
+        timeout: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Collect one independent perspective per consultant model.
 
@@ -183,6 +185,20 @@ class ResponseSynthesizer:
             max_iter = tools_cfg.scholar_max_tool_iterations
         else:
             max_iter = tools_cfg.max_tool_iterations
+        # v0.8.0: per-call overrides, clamped to the operator's config. The
+        # caller (an agent that cannot edit config.yaml) may dial DOWN from
+        # the resolved mode's budget or the configured timeout, never up —
+        # the operator set those ceilings for provider-limit and billing
+        # reasons the caller doesn't know about. Clamping (not erroring)
+        # keeps an over-ask usable: the caller sees the effective budget in
+        # each perspective's `tool_rounds_budget`.
+        if tool_budget is not None:
+            max_iter = min(tool_budget, max_iter)
+        eff_timeout = (
+            min(timeout, self.model_manager.config.parallel_timeout)
+            if timeout is not None
+            else None
+        )
 
         self.logger.info(f"Collecting perspectives from {len(models)} consultants", {
             "mode": mode.value,
@@ -219,6 +235,7 @@ class ResponseSynthesizer:
                     scope_hint=scope_hint or None,
                     mode_guidance=mode_guidance or None,
                     progress_cb=progress_cb,
+                    timeout=eff_timeout,
                 )
             except Exception as e:
                 self.logger.error(
@@ -231,11 +248,13 @@ class ResponseSynthesizer:
                 # grounded ones (files_read: [] was the only tell).
                 mode = CouncilMode.SCRIBE
                 analyses = await self.model_manager.call_models_parallel(
-                    models, context, question, progress_cb=progress_cb
+                    models, context, question, progress_cb=progress_cb,
+                    timeout=eff_timeout,
                 )
         else:
             analyses = await self.model_manager.call_models_parallel(
-                models, context, question, progress_cb=progress_cb
+                models, context, question, progress_cb=progress_cb,
+                timeout=eff_timeout,
             )
 
         perspectives: List[Dict[str, Any]] = []
