@@ -10,6 +10,7 @@ synthesizer's tool-calling loop only.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -161,6 +162,86 @@ class ToolRegistry:
             return f"No matches for '{pattern}'"
         return "\n".join(matches)
 
+    # content_search bounds (v0.9.0). All three exist so one careless regex
+    # cannot flood a consultant's context or stall the loop: at most this many
+    # matching lines are returned, at most this many files are scanned, and a
+    # matched line is clipped to this many characters. Files are scanned only
+    # up to MAX_READ_BYTES, same as read_file.
+    MAX_GREP_MATCHES = 100
+    MAX_GREP_FILES = 2000
+    MAX_GREP_LINE_CHARS = 300
+
+    def content_search(self, pattern: str, glob: str = "**/*") -> str:
+        """Regex-search file CONTENTS under the root; returns path:line: text.
+
+        This is the capability glob_search never had: glob matches *names*, so
+        "where is refresh_token used" forced a consultant to read whole files
+        one by one, burning the very round budget that bounds it. One search
+        answers the locating question; read_file then confirms the details.
+        """
+        if not pattern:
+            return "Error: empty pattern"
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            return f"Error: invalid regex '{pattern}': {e}"
+        clean = (glob or "**/*").lstrip("/")
+
+        matches: List[str] = []
+        scanned = 0
+        stopped: Optional[str] = None
+        try:
+            for p in self.workspace_root.glob(clean):
+                if not p.is_file():
+                    continue
+                # Same boundary discipline as glob_search: resolve and re-check
+                # every candidate, so a symlink cannot leak content from
+                # outside the root into the match list.
+                try:
+                    rel = p.resolve().relative_to(self.workspace_root)
+                except ValueError:
+                    continue
+                # Skip noise trees (VCS internals, caches, vendored deps) —
+                # pathlib's glob, unlike a shell, matches dot-directories.
+                # Hidden FILES (.env.example, .gitignore) stay searchable.
+                if any(
+                    part.startswith(".") or part in ("__pycache__", "node_modules")
+                    for part in rel.parts[:-1]
+                ):
+                    continue
+                if scanned >= self.MAX_GREP_FILES:
+                    stopped = f"stopped after scanning {self.MAX_GREP_FILES} files"
+                    break
+                scanned += 1
+                try:
+                    raw = p.read_bytes()[: self.MAX_READ_BYTES]
+                except Exception:
+                    continue
+                if b"\x00" in raw[:8192]:  # binary — no meaningful lines
+                    continue
+                text = raw.decode("utf-8", errors="replace")
+                for lineno, line in enumerate(text.splitlines(), 1):
+                    if rx.search(line):
+                        shown = line.strip()
+                        if len(shown) > self.MAX_GREP_LINE_CHARS:
+                            shown = shown[: self.MAX_GREP_LINE_CHARS] + "…"
+                        matches.append(f"{rel.as_posix()}:{lineno}: {shown}")
+                        if len(matches) >= self.MAX_GREP_MATCHES:
+                            stopped = f"stopped at {self.MAX_GREP_MATCHES} matches"
+                            break
+                if stopped and len(matches) >= self.MAX_GREP_MATCHES:
+                    break
+        except Exception as e:
+            return f"Error searching '{pattern}': {e}"
+
+        if not matches:
+            suffix = f" ({stopped})" if stopped else ""
+            return f"No matches for '{pattern}'{suffix}"
+        out = "\n".join(matches)
+        if stopped:
+            out += f"\n...[{stopped}]"
+        return out
+
     def think(self, thought: str) -> str:
         """Pure reflection — echoes the thought back. No I/O."""
         return f"[noted] {thought}"
@@ -173,6 +254,7 @@ class ToolRegistry:
             "read_file": self.read_file,
             "list_dir": self.list_dir,
             "glob_search": self.glob_search,
+            "content_search": self.content_search,
             "think": self.think,
         }
         fn = dispatch.get(name)
@@ -255,6 +337,33 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                         "type": "string",
                         "description": "Glob pattern relative to the workspace root.",
                     }
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "content_search",
+            "description": (
+                "Search file CONTENTS by regular expression (like grep). Returns "
+                "matching lines as 'path:line_number: text'. Use FIRST to locate "
+                "where a symbol, string, or pattern lives — one search is far "
+                "cheaper than reading files speculatively; then read_file the "
+                "hits that matter."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regular expression matched against each line of each file.",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Optional filename filter relative to the workspace root, e.g. '**/*.py'. Defaults to all files.",
+                    },
                 },
                 "required": ["pattern"],
             },

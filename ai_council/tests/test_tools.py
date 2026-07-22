@@ -183,3 +183,99 @@ def test_symlink_escape_blocked(tmp_path: Path, registry: ToolRegistry):
     finally:
         if link.exists() or link.is_symlink():
             link.unlink()
+
+# --- content_search (v0.9.0) --------------------------------------------------
+
+def test_content_search_finds_lines_with_locations(registry: ToolRegistry):
+    out = registry.content_search("def add")
+    assert "src/math.py:" in out
+    assert "def add" in out
+
+
+def test_content_search_glob_filter(tmp_path: Path):
+    (tmp_path / "a.py").write_text("needle in python\n")
+    (tmp_path / "b.txt").write_text("needle in text\n")
+    reg = ToolRegistry(workspace_root=str(tmp_path), allowed_tools=None)
+    out = reg.content_search("needle", glob="**/*.py")
+    assert "a.py:1:" in out
+    assert "b.txt" not in out
+
+
+def test_content_search_no_match(registry: ToolRegistry):
+    out = registry.content_search("zzz_never_in_fixture_zzz")
+    assert "No matches" in out
+
+
+def test_content_search_invalid_regex(registry: ToolRegistry):
+    out = registry.content_search("def (")
+    assert "invalid regex" in out
+
+
+def test_content_search_empty_pattern(registry: ToolRegistry):
+    assert "Error" in registry.content_search("")
+
+
+def test_content_search_match_cap_with_marker(tmp_path: Path):
+    lines = "\n".join(f"needle line {i}" for i in range(150))
+    (tmp_path / "big.txt").write_text(lines)
+    reg = ToolRegistry(workspace_root=str(tmp_path), allowed_tools=None)
+    out = reg.content_search("needle")
+    assert out.count("big.txt:") == ToolRegistry.MAX_GREP_MATCHES
+    assert "stopped at" in out
+
+
+def test_content_search_skips_binary(tmp_path: Path):
+    (tmp_path / "blob.bin").write_bytes(b"needle\x00needle")
+    (tmp_path / "plain.txt").write_text("needle\n")
+    reg = ToolRegistry(workspace_root=str(tmp_path), allowed_tools=None)
+    out = reg.content_search("needle")
+    assert "plain.txt:1:" in out
+    assert "blob.bin" not in out
+
+
+def test_content_search_skips_hidden_dirs_not_hidden_files(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("needle in vcs internals\n")
+    (tmp_path / ".env.example").write_text("needle in a dotfile\n")
+    reg = ToolRegistry(workspace_root=str(tmp_path), allowed_tools=None)
+    out = reg.content_search("needle")
+    assert ".env.example:1:" in out
+    assert ".git/" not in out
+
+
+def test_content_search_symlink_escape_excluded(tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("needle secret\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "ok.txt").write_text("needle fine\n")
+    os.symlink(outside / "secret.txt", root / "leak.txt")
+    reg = ToolRegistry(workspace_root=str(root), allowed_tools=None)
+    out = reg.content_search("needle")
+    assert "ok.txt:1:" in out
+    assert "leak" not in out
+    assert "secret" not in out
+
+
+def test_content_search_clips_long_lines(tmp_path: Path):
+    (tmp_path / "long.txt").write_text("needle " + "x" * 1000 + "\n")
+    reg = ToolRegistry(workspace_root=str(tmp_path), allowed_tools=None)
+    out = reg.content_search("needle")
+    line = out.splitlines()[0]
+    assert len(line) < 400
+    assert line.endswith("…")
+
+
+def test_content_search_via_dispatch_and_default_config(tmp_path: Path):
+    from ai_council.config import SynthesizerToolsConfig
+
+    assert "content_search" in SynthesizerToolsConfig().allowed_tools
+    assert any(
+        s["function"]["name"] == "content_search" for s in TOOL_SCHEMAS
+    )
+    (tmp_path / "f.txt").write_text("needle\n")
+    reg = ToolRegistry(workspace_root=str(tmp_path), allowed_tools=None)
+    out = reg.call("content_search", {"pattern": "needle"})
+    assert "f.txt:1:" in out
+    assert reg.call_counts["content_search"] == 1

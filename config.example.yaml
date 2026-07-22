@@ -63,7 +63,7 @@ synthesizer_tools:
                                         # via the ai_council tool's workspace_root arg
   max_tool_iterations: 12               # TRANSLATOR mode per-consultant tool budget
   scholar_max_tool_iterations: 64      # SCHOLAR mode per-consultant tool budget
-  allowed_tools: ["read_file", "list_dir", "glob_search", "think"]
+  allowed_tools: ["read_file", "list_dir", "glob_search", "content_search", "think"]
 
 # ---------------------------------------------------------------------------
 # The consultant roster

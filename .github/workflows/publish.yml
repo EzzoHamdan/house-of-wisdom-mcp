@@ -1,0 +1,39 @@
+name: publish
+
+# Publishes to PyPI via trusted publishing (OIDC) — no API token stored in the
+# repo. One-time setup on pypi.org: project "house-of-wisdom-mcp" → Publishing
+# → add GitHub publisher (owner EzzoHamdan, repo house-of-wisdom-mcp, workflow
+# publish.yml, environment pypi). Then publishing a GitHub release triggers
+# this workflow.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run test suite before building
+        run: uv run pytest -q
+      - name: Build sdist and wheel
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

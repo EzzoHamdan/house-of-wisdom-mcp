@@ -1,6 +1,6 @@
 [project]
 name = "house-of-wisdom-mcp"
-version = "0.8.0"
+version = "0.9.0"
 description = "House of Wisdom MCP — multi-model consultation council. Diverse AI model families investigate independently and return their own perspectives; the orchestrator weighs them. Inspired by the medieval Bayt al-Hikma."
 authors = [{name = "Ezzaldeen Hamdan", email = "ezzham1@gmail.com"}]
 license = {file = "LICENSE"}

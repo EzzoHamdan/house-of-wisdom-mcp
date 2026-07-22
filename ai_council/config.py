@@ -138,7 +138,9 @@ class SynthesizerToolsConfig(BaseModel):
         description="Hard cap on tool-call rounds per consultant before forcing a final answer"
     )
     allowed_tools: List[str] = Field(
-        default_factory=lambda: ["read_file", "list_dir", "glob_search", "think"],
+        default_factory=lambda: [
+            "read_file", "list_dir", "glob_search", "content_search", "think"
+        ],
         description="Subset of tools each consultant may call"
     )
 
