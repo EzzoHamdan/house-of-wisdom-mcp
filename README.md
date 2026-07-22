@@ -11,7 +11,7 @@
 >
 > **Requires** — Python 3.10+, `uv`/`uvx`, and at least **two** enabled models.
 >
-> **Reflects code as of** — 2026-07-22, `master`, package version `0.8.0`.
+> **Reflects code as of** — 2026-07-22, `master`, package version `0.9.0`.
 
 The medieval [Bayt al-Hikma](https://en.wikipedia.org/wiki/House_of_Wisdom) worked because it was
 diverse: scholars, translators, and copyists from many traditions read the same questions through
@@ -282,7 +282,7 @@ synthesis.py::collect_perspectives
   └── translator ───────► models.py::call_models_parallel_agentic
       scholar              semaphore = max_concurrent_consultants
                            per consultant, repeat until it answers or budget runs out:
-                             chat(tools=[read_file,list_dir,glob_search,think])
+                             chat(tools=[read_file,list_dir,glob_search,content_search,think])
                                ├─ tool_calls? → dispatch in sandbox → append results → loop
                                └─ plain text? → that is the analysis
                            budget exhausted → one forced "answer from what you have" turn
@@ -312,7 +312,7 @@ flowchart TD
     A --> L
     A2 --> L
     L{{"tool loop, per consultant<br/>capped by max_concurrent_consultants"}}
-    L -->|tool_calls| T[("sandbox: read_file · list_dir<br/>glob_search · think")]
+    L -->|tool_calls| T[("sandbox: read_file · list_dir<br/>glob_search · content_search · think")]
     T --> L
     L -->|plain text| O["one perspective per model<br/>errors included in-band"]
     P --> O
@@ -460,7 +460,7 @@ file as documentation of defaults.
 | `synthesizer_tools.workspace_root` | `null` → process cwd (refused when home / fs root) | `null` | absolute path to an existing directory |
 | `synthesizer_tools.max_tool_iterations` | `8` | `12` | 1–128 |
 | `synthesizer_tools.scholar_max_tool_iterations` | `64` | `64` | 1–256 |
-| `synthesizer_tools.allowed_tools` | all four | all four | subset of the four tool names — ⚠ omit the key (**null**) for all four; `[]` permits **none** |
+| `synthesizer_tools.allowed_tools` | all five | all five | subset of the five tool names — ⚠ omit the key (**null**) for all five; `[]` permits **none**. A config pinning an explicit pre-v0.9.0 list must add `content_search` by name to get it |
 | `models` | 3 OpenRouter models | 6 enabled Ollama + 4 disabled paid | 2–10 entries (10 configured max, 2 enabled min) |
 
 A minimal working config is just:
@@ -684,17 +684,18 @@ client.
 | `read_file` | `path` | UTF-8 read, truncated at 200,000 bytes with a `...[truncated]` marker. Undecodable bytes are replaced, not fatal. |
 | `list_dir` | `path` (default root) | One entry per line, relative to root, `/` suffix on directories. |
 | `glob_search` | `pattern` | Glob relative to root, e.g. `**/*.py`. Capped at 100 results. |
+| `content_search` | `pattern`, `glob?` | v0.9.0. Regex grep over file **contents**; returns `path:line: text` hits. Bounded on every axis: 100 matches, 2,000 files scanned, 200,000 bytes read per file, 300 chars per shown line. Binary files and dot-*directories* (`.git`, caches) are skipped — dot-*files* stay searchable. Every candidate is re-checked against the sandbox boundary, so a symlink cannot leak outside content. |
 | `think` | `thought` | Echoes the thought back. No I/O. Costs budget on the same terms as the others. |
 
 Restrict the set with `synthesizer_tools.allowed_tools`; a call to a tool outside the list returns
 an error string to the model rather than executing. ⚠ Distinguish the two "empty" cases: **omitting
-the key** (null) permits all four, while `allowed_tools: []` permits **none** — an empty allowlist
+the key** (null) permits all five, while `allowed_tools: []` permits **none** — an empty allowlist
 advertises no tools, so every consultant loses read access. To narrow the surface, name the tools
 you want, e.g. `["read_file", "think"]`; to grant everything, leave the key out.
 
 ### What never happens
 
-- No writes, no shell, no network from the tools. The four above are the entire surface
+- No writes, no shell, no network from the tools. The five above are the entire surface
   (`tools.py::ToolRegistry.call`).
 - No read outside `workspace_root`. Paths are resolved with `Path.resolve()` and checked with
   `relative_to()`, so symlinks pointing out of the root are rejected as `SandboxViolation`
@@ -759,6 +760,17 @@ in code.
 | ⚠ | Detail |
 | --- | --- |
 | `synthesizer_tools.enabled` | A default-mode switch, not a capability gate — explicit `mode` bypasses it. `synthesis.py:126-135` |
+
+> **Added in v0.9.0 — content search, CI, and packaging.** A fifth sandbox tool,
+> `content_search`, greps file contents by regex (`path:line: text` hits, bounded at 100 matches /
+> 2,000 files / 200 KB per file, binary and dot-directories skipped, sandbox boundary re-checked
+> per candidate). Locating a symbol previously meant globbing names and reading whole files —
+> spending the round budget on enumeration. It is in the default `allowed_tools`; configs pinning
+> an explicit older list must add it by name. Separately: GitHub Actions now runs the full test
+> suite and ruff on every push/PR (Python 3.10–3.13), and a release-triggered workflow publishes
+> to PyPI via trusted publishing. `tools.py`, `config.py`, `models.py`, `.github/workflows/`.
+
+<!-- -->
 
 > **Added in v0.8.0 — per-call depth dials.** `consult` gained optional `tool_budget` (max tool
 > rounds per consultant) and `timeout` (wall-clock seconds) arguments. Both are **clamped to the
@@ -873,14 +885,16 @@ every tool call each consultant makes.
 | Mode enum, mode resolution, per-mode prompt suffixes, perspective assembly | [`ai_council/synthesis.py`](ai_council/synthesis.py) |
 | Client construction, parallel dispatch, the tool loop, concurrency semaphore | [`ai_council/models.py`](ai_council/models.py) |
 | Config schema, defaults, startup validation, YAML/env loading | [`ai_council/config.py`](ai_council/config.py) |
-| Sandbox, the four tools, path resolution, tool schemas | [`ai_council/tools.py`](ai_council/tools.py) |
+| Sandbox, the five tools, path resolution, tool schemas | [`ai_council/tools.py`](ai_council/tools.py) |
 | Structured stderr logging | [`ai_council/logger.py`](ai_council/logger.py) |
 
-Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 151 tests cover
+Run the tests with `uv run pytest` (or `pytest -q` inside an activated venv). 162 tests cover
 config parsing, sandbox path resolution, the tool loop, mode resolution, workspace-root
-validation, per-call override clamping, prompt assembly, transient retry, telemetry, progress
-notifications, and the discoverability contract. All model I/O is stubbed — no test hits a live
-endpoint.
+validation, per-call override clamping, content search, prompt assembly, transient retry,
+telemetry, progress notifications, and the discoverability contract. All model I/O is stubbed —
+no test hits a live endpoint. CI (`.github/workflows/test.yml`) runs the suite plus `ruff check`
+on every push and PR across Python 3.10–3.13; `.github/workflows/publish.yml` builds and uploads
+to PyPI on a GitHub release via trusted publishing.
 
 ---
 
