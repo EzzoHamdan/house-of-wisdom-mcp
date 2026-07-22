@@ -18,6 +18,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run test suite
-        run: uv run pytest -q
+        run: uv run --extra test pytest -q
       - name: Lint
         run: uvx ruff check ai_council/

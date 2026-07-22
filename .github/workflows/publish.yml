@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Run test suite before building
-        run: uv run pytest -q
+        run: uv run --extra test pytest -q
       - name: Build sdist and wheel
         run: uv build
       - uses: actions/upload-artifact@v4
